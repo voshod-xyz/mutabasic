@@ -43,6 +43,12 @@ python mutabasic.py --self-test
 python -m pip install -e .
 ```
 
+После установки доступна консольная команда:
+
+```bash
+mutabasic --self-test
+```
+
 Основные файлы:
 
 | Путь | Назначение |
@@ -50,7 +56,7 @@ python -m pip install -e .
 | `mutabasic.py` | Совместимый CLI-фасад |
 | `mutabasic_pkg/core.py` | VM, компиляция листинга и REPL |
 | `mutabasic_pkg/api.py` | API для Python-приложений |
-| `mutabasic_pkg/parser.py` | Текущая parsing-абстракция |
+| `mutabasic_pkg/parser.py` | Токены, AST-фасад и source locations |
 | `mutabasic_pkg/registry.py` | Реестр пользовательских функций и команд |
 | `mutabasic_pkg/security.py` | Политика выполнения shell-команд |
 | `tests/` | Регрессионные тесты на `unittest` |
@@ -76,10 +82,11 @@ python -m pip install -e .
 | Данные | Числа, строки, многомерные массивы, DATA/READ/RESTORE |
 | Самоинспекция | LINE$, LINEEXISTS, FINDLINE, PROGRAM$ |
 | Изменение кода | SOURCE SET, INSERT, DELETE, REPLACE, UNDO, REDO |
-| Отладка | STEP, BREAK, CONT, TRACE, ограничение инструкций |
+| Отладка | STEP, BREAK WHEN, WHERE, STACK, WATCH, TRACE, JSON trace |
 | Состояние | Системные показатели, счётчики, именованные таймеры |
-| Хранение | Листинги, JSON-проекты, переменные, снимки |
-| Файлы | Последовательные текстовые файлы UTF-8, операции с путями |
+| Хранение | Листинги, JSON-проекты, переменные, снимки, CHECKPOINT/ROLLBACK |
+| Аудит | Журнал изменений листинга и события VM |
+| Файлы | UTF-8, операции с путями, необязательная FilePolicy |
 | ОС | Команды оболочки при явном разрешении --allow-shell |
 
 ## Пример: программа изменяет себя
@@ -164,7 +171,10 @@ PRINT PROGRAM$
 | UNDO [n] / REDO [n] / HISTORY | История |
 | RUN [line_or_label] | Новый запуск с очисткой пользовательских переменных |
 | CONT / STEP [n] | Продолжение и шаги |
-| BREAK [numbers] / UNBREAK [numbers] | Точки останова |
+| BREAK [numbers] [WHEN expression] / UNBREAK [numbers] | Точки останова |
+| WHERE / STACK / WATCH | Текущее место, стек и наблюдаемые выражения |
+| CHECKPOINT [name] / ROLLBACK [name] | Именованные точки восстановления |
+| AUDIT | Журнал изменений листинга |
 | VARS / SYS / EVAL expression | Инспекция |
 | SET variable=expression | Присваивание |
 | CHECK | Проверка структуры блоков |
@@ -208,6 +218,10 @@ PRINT TIMERGET("work")
 `RUNCOUNT` хранится в проекте и снимках. `LAUNCHCOUNT` хранится в отдельном файле состояния пользователя; `--no-state` отключает его сохранение. Обновление счётчика не синхронизировано между одновременно запускаемыми процессами.
 
 `ELAPSED` учитывает время исполнения, включая INPUT/SLEEP, но не паузы REPL. Именованные таймеры считают монотонное реальное время, включая паузы, пока не остановлены.
+
+Для воспроизводимых запусков используйте `--seed`. Встраиваемый API также
+принимает `time_provider` и `random_provider`, чтобы тесты могли подменять
+время и случайность.
 
 ## Встроенные функции
 
@@ -280,6 +294,16 @@ muta> CONT
 
 Снимок из BASIC сохраняет продолжение после инструкции SNAPSHOT. При открытых BASIC-файлах создание снимка запрещено. Файлы, рабочая папка, окружение ОС и эффекты внешних команд не восстанавливаются. Право запуска SHELL задаётся текущим CLI, а не снимком.
 
+Контрольные точки VM хранятся в памяти процесса:
+
+```text
+muta> CHECKPOINT before-change
+muta> ROLLBACK before-change
+```
+
+`AUDIT` показывает журнал мутаций с описанием и временем. Контрольные точки
+и аудит не являются откатом внешних файлов или команд ОС.
+
 ## CLI
 
 ```bash
@@ -289,6 +313,9 @@ python mutabasic.py --self-test
 python mutabasic.py example.bas
 python mutabasic.py example.bas --no-run
 python mutabasic.py example.bas --trace -i
+python mutabasic.py example.bas --trace-json
+python mutabasic.py example.bas --seed 42
+python mutabasic.py example.bas --fs-root ./sandbox --fs-read "*.txt" --fs-write "*.out"
 python mutabasic.py --project example.mbp --no-run
 python mutabasic.py --restore snapshot.json -i
 python mutabasic.py -e "EVAL 2^10"
@@ -306,6 +333,10 @@ python mutabasic.py -e "EVAL 2^10"
 | `--max-steps` | Лимит инструкций на RUN/CONT; 0 — без лимита |
 | `--history-limit` | Глубина истории |
 | `--trace` | Трассировка в stderr |
+| `--trace-json` | Трассировка инструкций в формате JSON Lines |
+| `--seed` | Начальное значение генератора случайных чисел |
+| `--fs-root` | Повторяемый разрешённый корень файловой системы |
+| `--fs-read`, `--fs-write` | Шаблоны имён файлов для чтения/записи |
 | `-q`, `--quiet` | Убрать приветствие и часть служебного вывода |
 | `--check` | Только проверка структуры блоков |
 | `--state-file`, `--no-state` | Постоянный счётчик запусков |
@@ -323,6 +354,9 @@ python mutabasic.py -e "EVAL 2^10"
 - SEEK использует позиции текстового потока Python, а не произвольные байтовые смещения QBasic.
 - Произвольные переходы через границы активных циклов не очищают их стеки.
 - Снимки и история листинга не являются откатом внешнего мира.
+- Полный AST пока используется как parsing-фасад; исполнение сохраняет
+  совместимый прагматический VM-путь.
+- `SUB`/`FUNCTION` и полноценный language-server пока не реализованы.
 
 ## Проверка и сообщения об ошибках
 
@@ -340,16 +374,16 @@ python -m unittest discover -s tests -v
 ## Архитектура и встраивание
 
 `mutabasic.py` теперь является совместимым CLI-фасадом. Реализация находится в
-`mutabasic_pkg`: `core.py` содержит VM/REPL (поэтапно выделяемый legacy-слой),
-`parser.py` предоставляет стабильную parsing-связь для будущего AST,
+`mutabasic_pkg`: `core.py` содержит VM/REPL,
+`parser.py` предоставляет токены, `SourceLocation`, `ASTNode` и `ProgramAST`,
 `security.py` — политики shell, `registry.py` — расширения, а `api.py` —
 небольшой Python API:
 
 ```python
-from mutabasic_pkg import MutaBasic, ShellPolicy
+from mutabasic_pkg import FilePolicy, MutaBasic, ShellPolicy
 app = MutaBasic(shell_policy=ShellPolicy(
     enabled=True, commands=frozenset({"echo"})
-))
+), fs_policy=FilePolicy(roots=(".",), read=frozenset({"*.txt"})))
 app.load({10: 'PRINT "embedded"', 20: "END"}).run()
 ```
 
@@ -378,8 +412,18 @@ VM.
 
 Функции и команды можно добавлять без изменения интерпретатора:
 `register_function("NAME", callable)` и `register_command("NAME",
-handler(shell, argument))`. `parse_source()` и `tokenize()` являются
-текущей parsing-абстракцией; полноценный AST остаётся отдельным этапом.
+handler(shell, argument))`. `parse_source()` и `tokenize()` сохраняют совместимость, а `lex()` и
+`parse_program()` добавляют source-aware parsing:
+
+```python
+from mutabasic_pkg import lex, parse_program
+
+tokens = lex('x = 2 + 3')
+ast = parse_program('10 PRINT "hello"\n20 END')
+```
+
+Полный AST пока используется как parsing-фасад; исполнение сохраняет
+совместимый прагматический VM-путь.
 Регистрация действует для VM, созданных после регистрации:
 
 ```python
@@ -432,12 +476,13 @@ python -m unittest discover -s tests -v
 расширений и shell-политику. При добавлении новой инструкции или функции
 добавляйте отдельный позитивный и негативный сценарий.
 
-## Дорожная карта
+## Дальнейшая разработка
 
-- выделить компиляцию выражений и исполнения инструкций в отдельные модули;
-- заменить текущую parsing-абстракцию формальной грамматикой и AST;
-- расширить policy до allow-list путей и безопасного запуска без `shell=True`;
-- наращивать совместимость BASIC и покрытие тестами.
+- полноценное исполнение через AST вместо совместимого прагматического VM-пути;
+- `SUB`/`FUNCTION` и более широкая совместимость с QBasic;
+- language-server/editor integration;
+- расширение FilePolicy до лимитов размера и отдельных разрешений директорий;
+- property-based/fuzz-тесты для выражений, снимков и мутаций.
 
 При сообщении о проблеме приложите:
 

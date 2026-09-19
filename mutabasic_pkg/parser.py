@@ -8,6 +8,7 @@ from .core import parse_source as _parse_source
 from .core import split_statements as _split_statements
 from .core import tokenize as _tokenize
 from .core import TOKEN as _TOKEN
+from .core import BasicError
 
 __all__ = [
     "ASTNode",
@@ -76,7 +77,7 @@ def lex(text: str) -> list[Token]:
             break
         match = _TOKEN.match(text, position)
         if not match:
-            raise ValueError(f"Недопустимая часть выражения: {text[position:]!r}")
+            raise BasicError(f"Недопустимая часть выражения: {text[position:]!r}")
         kind = match.lastgroup
         value = match.group(kind)
         start = position
@@ -103,6 +104,7 @@ def parse_program(source: str | dict[int, str]) -> ProgramAST:
         lines = parse_source(source)
     else:
         lines = {int(k): str(v) for k, v in source.items()}
+        lines = parse_source("\n".join(f"{number} {text}" for number, text in lines.items()))
     statements: list[ASTNode] = []
     tokens: list[Token] = []
     locations: dict[int, SourceLocation] = {}

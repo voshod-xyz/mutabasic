@@ -7,6 +7,18 @@ name = "mutabasic"
 version = "1.0.0"
 description = "A small self-modifying BASIC interpreter"
 requires-python = ">=3.10"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Leo" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+]
+
+[project.scripts]
+mutabasic = "mutabasic_pkg.core:main"
 
 [tool.setuptools]
 packages = ["mutabasic_pkg"]

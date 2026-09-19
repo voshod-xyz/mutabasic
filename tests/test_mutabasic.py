@@ -6,8 +6,8 @@ import subprocess
 import sys
 
 from mutabasic_pkg import (
-    BasicError, MutaBasic, ShellPolicy, VM, parse_source, register_command,
-    register_function,
+    BasicError, FilePolicy, MutaBasic, ShellPolicy, VM, lex, parse_program,
+    parse_source, register_command, register_function,
 )
 
 
@@ -74,6 +74,18 @@ class MutaBasicTests(unittest.TestCase):
             vm.shell("python -c \"print(1)\"")
         with self.assertRaises(BasicError):
             vm.shell("echo allowed & python -c \"print(1)\"")
+
+    def test_parser_metadata_and_checkpoint(self):
+        tokens = lex("x=1")
+        self.assertEqual(tokens[0].kind, "name")
+        self.assertEqual(parse_program("10 END").source, {10: "END"})
+
+        vm = VM(seed=7, fs_policy=FilePolicy(roots=(os.getcwd(),)))
+        vm.immediate("x=1")
+        vm.checkpoint("before")
+        vm.immediate("x=2")
+        vm.rollback("before")
+        self.assertEqual(vm.evaluate("x"), 1)
 
 
 if __name__ == "__main__":

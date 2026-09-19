@@ -78,13 +78,11 @@ class FilePolicy:
             return
 
         if self.roots:
-            if not target.is_absolute():
-                target = Path.cwd() / target
             resolved = target.resolve()
             ok = False
             for root in self.roots:
-                candidate = root.rstrip("/\\") + (os.sep if os.name == "nt" else "/")
-                if str(resolved).startswith(candidate):
+                candidate = Path(root).resolve()
+                if resolved == candidate or candidate in resolved.parents:
                     ok = True
                     break
             if not ok:
@@ -763,10 +761,7 @@ class VM:
         payload = dict(payload)
         payload.setdefault("event", event)
         for callback in self.event_hooks.get(event, []):
-            try:
-                callback(self, **payload)
-            except Exception:
-                pass
+            callback(self, **payload)
 
     def _now_iso(self) -> str:
         current = self.time_provider() if callable(self.time_provider) else dt.datetime.now()
@@ -2410,6 +2405,7 @@ WHERE / STACK / WATCH expr Отладка и стек вызовов
 BREAK [номера] [WHEN expr] Точки останова и условия
 CHECKPOINT [имя]           Сохранить именованную точку восстановления
 ROLLBACK [имя|индекс]      Восстановить контрольную точку
+AUDIT                      Журнал изменений листинга
 UNBREAK [номера]           Удалить точки, без аргументов — все
 VARS                       Переменные и массивы
 SYS                        Системные показатели
@@ -2548,6 +2544,8 @@ SEEK использует позиции текстового потока Pytho
 MutaBasic не является песочницей.
 Даже при allow-list файловая система не изолируется; запускайте
 недоверенные программы в отдельном процессе с ограниченными правами.
+Для ограничения файлов используйте CLI-параметры --fs-root, --fs-read
+и --fs-write; политика также доступна как FilePolicy в Python API.
 """,
     "snapshots": """
 .bas: текстовый листинг.
@@ -2608,7 +2606,8 @@ class Shell:
     COMMANDS = {
         "HELP", "NEW", "LOAD", "SAVE", "PROJECT", "LIST", "EDIT", "INSERT",
         "DELETE", "FIND", "REPLACE", "UNDO", "REDO", "HISTORY", "CHECK",
-        "RUN", "CONT", "STEP", "BREAK", "UNBREAK", "VARS", "SYS", "SET",
+        "RUN", "CONT", "STEP", "BREAK", "UNBREAK", "WHERE", "STACK", "WATCH",
+        "CHECKPOINT", "ROLLBACK", "AUDIT", "VARS", "SYS", "SET",
         "EVAL", "VARSAVE", "VARLOAD", "SNAPSHOT", "RESTORE", "PWD", "CD",
         "FILES", "SHELL", "BASIC", "QUIT", "EXIT",
     }
@@ -2754,13 +2753,49 @@ class Shell:
             if not self.quiet:
                 self.location()
         elif command == "BREAK":
-            vm.breakpoints.update(int(x) for x in argument.split())
+            match = re.fullmatch(r"(.+?)(?:\s+WHEN\s+(.+))?", argument, re.I)
+            if argument and match:
+                numbers = [int(x) for x in match.group(1).split()]
+                vm.breakpoints.update(numbers)
+                if match.group(2):
+                    for number in numbers:
+                        vm.break_conditions[number] = match.group(2)
             print("Точки:", *sorted(vm.breakpoints))
         elif command == "UNBREAK":
             if argument:
-                vm.breakpoints.difference_update(int(x) for x in argument.split())
+                numbers = [int(x) for x in argument.split()]
+                vm.breakpoints.difference_update(numbers)
+                for number in numbers:
+                    vm.break_conditions.pop(number, None)
             else:
                 vm.breakpoints.clear()
+                vm.break_conditions.clear()
+        elif command in ("WHERE", "STACK"):
+            self.location()
+            if command == "STACK":
+                for index, address in enumerate(reversed(vm.calls), 1):
+                    print(f"{index}: {address[0]}:{address[1]}")
+            for line in vm._format_watch():
+                print(line)
+        elif command == "WATCH":
+            parts = argument.split(None, 1)
+            if not parts:
+                for line in vm._format_watch():
+                    print(line)
+            elif len(parts) == 1:
+                vm.add_watch(parts[0])
+                print(f"Watch: {parts[0]}")
+            else:
+                vm.add_watch(parts[0], parts[1])
+                print(f"Watch: {parts[0]} = {parts[1]}")
+        elif command == "CHECKPOINT":
+            print(vm.checkpoint(path_argument(argument) if argument else None))
+        elif command == "ROLLBACK":
+            vm.rollback(path_argument(argument) if argument else None)
+            self.location()
+        elif command == "AUDIT":
+            for index, record in enumerate(vm.mutation_history, 1):
+                print(f"{index}: {record['time']} {record['description']}")
         elif command == "VARS":
             for name, value in sorted(vm.variables.items()):
                 print(f"{name} = {value!r}")
@@ -3000,6 +3035,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-shell-command", action="append", default=[],
                         metavar="COMMAND",
                         help="Разрешить только этот executable после --allow-shell")
+    parser.add_argument("--seed", type=int,
+                        help="Начальное значение генератора случайных чисел")
+    parser.add_argument("--trace-json", action="store_true",
+                        help="Трассировка инструкций как JSON Lines")
+    parser.add_argument("--fs-root", action="append", default=[],
+                        metavar="DIR", help="Разрешённый корень файловой системы")
+    parser.add_argument("--fs-read", action="append", default=[],
+                        metavar="PATTERN", help="Разрешённый шаблон чтения файлов")
+    parser.add_argument("--fs-write", action="append", default=[],
+                        metavar="PATTERN", help="Разрешённый шаблон записи файлов")
     parser.add_argument("--max-steps", type=int, default=1_000_000,
                         help="Лимит инструкций на RUN/CONT; 0 — без лимита")
     parser.add_argument("--history-limit", type=int, default=100,
@@ -3066,6 +3111,13 @@ def main() -> int:
                 enabled=args.allow_shell,
                 commands=frozenset(args.allow_shell_command),
             ),
+            seed=args.seed,
+            fs_policy=FilePolicy(
+                read=frozenset(args.fs_read),
+                write=frozenset(args.fs_write),
+                allow_all=not (args.fs_root or args.fs_read or args.fs_write),
+                roots=tuple(args.fs_root),
+            ),
             history_limit=args.history_limit,
             launch_count=launch_count,
         )
@@ -3098,7 +3150,11 @@ def main() -> int:
         if has_input and not args.no_run:
             if not args.restore:
                 vm.start()
-            vm.run(limit=args.max_steps, trace=args.trace)
+            vm.run(
+                limit=args.max_steps,
+                trace=args.trace,
+                trace_json=args.trace_json,
+            )
 
         keep_going = True
         for command in args.execute:
