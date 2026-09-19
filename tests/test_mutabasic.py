@@ -32,6 +32,10 @@ class MutaBasicTests(unittest.TestCase):
         self.assertEqual(parse_source('10 PRINT "a"\n20 END'), {
             10: 'PRINT "a"', 20: "END"
         })
+        with self.assertRaises(BasicError):
+            parse_source("10 PRINT 1\n10 END")
+        with self.assertRaises(BasicError):
+            parse_source("0 END")
 
     def test_embedded_execution(self):
         vm = VM()
@@ -56,6 +60,8 @@ class MutaBasicTests(unittest.TestCase):
         self.assertEqual(vm.shell("echo allowed", capture=True).strip(), "allowed")
         with self.assertRaises(BasicError):
             vm.shell("python -c \"print(1)\"")
+        with self.assertRaises(BasicError):
+            vm.shell("echo allowed & python -c \"print(1)\"")
 
 
 if __name__ == "__main__":

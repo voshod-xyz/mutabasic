@@ -199,7 +199,12 @@ def parse_source(source: str) -> dict[int, str]:
         match = re.fullmatch(r"\s*(\d+)\s*(.*)", line)
         if not match:
             raise BasicError(f"Ожидалась нумерованная строка: {line}")
-        result[int(match.group(1))] = match.group(2)
+        number = int(match.group(1))
+        if not 1 <= number < sys.maxsize:
+            raise BasicError(f"Номер строки должен быть положительным: {number}")
+        if number in result:
+            raise BasicError(f"Повторный номер строки {number}")
+        result[number] = match.group(2)
     return result
 
 
@@ -1044,14 +1049,17 @@ class VM:
         except Exception as exc:
             raise BasicError(str(exc)) from exc
 
-        result = subprocess.run(
-            command,
-            shell=True,
-            text=True,
-            capture_output=capture,
-            errors="replace",
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                text=True,
+                capture_output=capture,
+                errors="replace",
+                check=False,
+            )
+        except OSError as exc:
+            raise BasicError(f"Не удалось выполнить SHELL: {exc}") from exc
         self.last_exit = result.returncode
         self.last_output = result.stdout if capture else ""
         return self.last_output if capture else self.last_exit
