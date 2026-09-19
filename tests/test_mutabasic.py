@@ -1,4 +1,7 @@
 import unittest
+import os
+import subprocess
+import sys
 
 from mutabasic_pkg import (
     BasicError, MutaBasic, ShellPolicy, VM, parse_source, register_command,
@@ -7,6 +10,20 @@ from mutabasic_pkg import (
 
 
 class MutaBasicTests(unittest.TestCase):
+    def test_cli_help_supports_non_utf8_console(self):
+        environment = os.environ.copy()
+        environment["PYTHONIOENCODING"] = "cp1252"
+        result = subprocess.run(
+            [sys.executable, "mutabasic.py", "--help"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="strict",
+            env=environment,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage:", result.stdout)
+
     def test_expression_and_program_execution(self):
         app = MutaBasic().load({10: "x=2^3", 20: "END"}).run()
         self.assertEqual(app.evaluate("x"), 8)
