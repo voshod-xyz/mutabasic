@@ -63,6 +63,41 @@ class BasicError(Exception):
     """An error intended to be shown without a Python traceback."""
 
 
+@dataclass(frozen=True)
+class FilePolicy:
+    """Optional coarse capability policy for filesystem access."""
+
+    read: frozenset[str] = frozenset()
+    write: frozenset[str] = frozenset()
+    allow_all: bool = True
+    roots: tuple[str, ...] = ()
+
+    def check(self, path: str | Path, *, operation: str) -> None:
+        target = Path(path)
+        if self.allow_all and not self.read and not self.write and not self.roots:
+            return
+
+        if self.roots:
+            if not target.is_absolute():
+                target = Path.cwd() / target
+            resolved = target.resolve()
+            ok = False
+            for root in self.roots:
+                candidate = root.rstrip("/\\") + (os.sep if os.name == "nt" else "/")
+                if str(resolved).startswith(candidate):
+                    ok = True
+                    break
+            if not ok:
+                raise BasicError(f"{operation}: путь вне разрешённых корней")
+
+        if operation == "read":
+            if self.read and not any(fnmatch.fnmatch(target.name, pattern) for pattern in self.read):
+                raise BasicError(f"{operation}: файл не разрешён по FilePolicy")
+        if operation == "write":
+            if self.write and not any(fnmatch.fnmatch(target.name, pattern) for pattern in self.write):
+                raise BasicError(f"{operation}: файл не разрешён по FilePolicy")
+
+
 def canonical(name: str) -> str:
     return name.upper()
 
@@ -652,6 +687,10 @@ class VM:
         shell_policy: ShellPolicy | None = None,
         history_limit: int = 100,
         launch_count: int = 1,
+        seed: int | float | None = None,
+        time_provider: Any | None = None,
+        random_provider: Any | None = None,
+        fs_policy: FilePolicy | None = None,
     ):
         self.program = Program({})
         self.project_name = "untitled"
@@ -683,18 +722,28 @@ class VM:
         self.execution_started: float | None = None
 
         self.timers: dict[str, Timer] = {}
-        self.rng = random.Random()
+        self.rng = random.Random(seed)
         self.last_random = 0.0
+        self.seed = seed
+        self.time_provider = time_provider or (lambda: dt.datetime.now())
+        self.random_provider = random_provider or None
 
         self.files: dict[int, Any] = {}
         self.breakpoints: set[int] = set()
         self.break_address: Address | None = None
+        self.break_conditions: dict[int, str] = {}
+        self.watchlist: dict[str, str] = {}
+        self.checkpoints: dict[str, dict] = {}
+        self.mutation_history: list[dict] = []
+        self.event_hooks: dict[str, list] = {}
+        self.trace_events: list[dict] = []
 
         self.shell_policy = shell_policy or ShellPolicy(enabled=allow_shell)
         self.allow_shell = self.shell_policy.enabled
         self.history_limit = history_limit
         self.undo_stack: list[dict] = []
         self.redo_stack: list[dict] = []
+        self.fs_policy = fs_policy or FilePolicy()
 
         self.functions = self.make_functions()
         self.readonly = {
@@ -705,6 +754,119 @@ class VM:
             "REDOCOUNT", "LASTEXIT", "LASTOUTPUT$", "LASTERROR$", "ERRORLINE",
             "CWD$", "PROJECT$", "STATE$", "VERSION$", "PID",
         }
+
+    def on(self, event: str, callback):
+        self.event_hooks.setdefault(event, []).append(callback)
+        return callback
+
+    def emit_event(self, event: str, **payload):
+        payload = dict(payload)
+        payload.setdefault("event", event)
+        for callback in self.event_hooks.get(event, []):
+            try:
+                callback(self, **payload)
+            except Exception:
+                pass
+
+    def _now_iso(self) -> str:
+        current = self.time_provider() if callable(self.time_provider) else dt.datetime.now()
+        if hasattr(current, "isoformat"):
+            return current.isoformat(timespec="seconds")
+        return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def set_deterministic(self, *, seed: int | float | None = None, time_provider=None, random_provider=None):
+        if seed is not None:
+            self.seed = seed
+            self.rng.seed(seed)
+        if time_provider is not None:
+            self.time_provider = time_provider
+        if random_provider is not None:
+            self.random_provider = random_provider
+
+    def checkpoint(self, name: str | None = None, *, description: str = "checkpoint") -> str:
+        label = name or f"checkpoint-{len(self.checkpoints) + 1}"
+        payload = {
+            "name": label,
+            "description": description,
+            "timestamp": self._now_iso(),
+            "snapshot": {
+                "project": self.project_payload(),
+                "variables": self.variable_payload(),
+                "pc": self.pc,
+                "calls": self.calls,
+                "loops": copy.deepcopy(self.loops),
+                "data_pointer": self.data_pointer,
+                "state": self.state,
+                "steps": self.steps,
+                "total_steps": self.total_steps,
+                "elapsed": self.elapsed(),
+                "breakpoints": sorted(self.breakpoints),
+                "timers": {n: timer.dump() for n, timer in self.timers.items()},
+                "random_state": self.rng.getstate(),
+                "last_random": self.last_random,
+            },
+        }
+        self.checkpoints[label] = payload
+        self.emit_event("checkpoint", name=label, description=description)
+        return label
+
+    def rollback(self, name: str | int | None = None) -> dict:
+        if name is None:
+            if not self.checkpoints:
+                raise BasicError("Нет сохранённых контрольных точек")
+            name = next(reversed(self.checkpoints))
+        if isinstance(name, int):
+            names = list(self.checkpoints)
+            if not 0 <= name < len(names):
+                raise BasicError("Неверный индекс контрольной точки")
+            name = names[name]
+        if name not in self.checkpoints:
+            raise BasicError(f"Контрольная точка не найдена: {name}")
+        snapshot = self.checkpoints[name]["snapshot"]
+        self.restore_project_payload(snapshot["project"])
+        self.variables, self.arrays, self.base = self.validate_variables(snapshot["variables"])
+        self.pc = snapshot["pc"]
+        self.calls = [tuple(x) for x in snapshot["calls"]]
+        self.loops = copy.deepcopy(snapshot["loops"])
+        self.data_pointer = int(snapshot["data_pointer"])
+        self.state = snapshot["state"]
+        self.steps = int(snapshot["steps"])
+        self.total_steps = int(snapshot["total_steps"])
+        self.execution_time = float(snapshot["elapsed"])
+        self.breakpoints = set(snapshot["breakpoints"])
+        self.timers = {canonical(n): Timer(v["elapsed"], v["running"]) for n, v in snapshot["timers"].items()}
+        self.rng.setstate(snapshot["random_state"])
+        self.last_random = snapshot["last_random"]
+        self.emit_event("rollback", name=name)
+        return self.checkpoints[name]
+
+    def list_checkpoints(self):
+        return list(self.checkpoints.items())
+
+    def add_watch(self, name: str, expr: str | None = None):
+        self.watchlist[canonical(name)] = expr or name
+
+    def remove_watch(self, name: str):
+        self.watchlist.pop(canonical(name), None)
+
+    def _check_fs_access(self, path: str | Path, *, operation: str) -> None:
+        if self.fs_policy is not None:
+            self.fs_policy.check(path, operation=operation)
+
+    def audit_mutation(self, description: str, before: dict, after: dict) -> dict:
+        diff = {"description": description, "before": before, "after": after, "time": self._now_iso()}
+        self.mutation_history.append(diff)
+        self.emit_event("mutation", description=description, diff=diff)
+        return diff
+
+    def _format_watch(self):
+        result = []
+        for name, expr in self.watchlist.items():
+            try:
+                result.append(f"{name} = {display(self.evaluate(expr))}")
+            except Exception as exc:
+                result.append(f"{name} = <{exc}>")
+        return result
 
     def evaluate(self, text: str) -> Value:
         try:
@@ -745,7 +907,7 @@ class VM:
         return self.execution_time + extra
 
     def system_value(self, name: str) -> Value:
-        now = dt.datetime.now()
+        now = self.time_provider() if callable(self.time_provider) else dt.datetime.now()
         current_line = self.current[0] if self.current else 0
         next_line = 0 if self.pc == ADDRESS_END else self.pc[0]
 
@@ -874,6 +1036,10 @@ class VM:
         return array["bounds"][dimension - 1][int(upper)]
 
     def random_number(self, argument: float = 1) -> float:
+        if self.random_provider is not None:
+            value = float(self.random_provider(argument))
+            self.last_random = value
+            return value
         if argument < 0:
             self.rng.seed(argument)
         if argument != 0:
@@ -1070,7 +1236,8 @@ class VM:
         return {
             "source": dict(self.program.source),
             "description": description,
-            "time": dt.datetime.now().isoformat(timespec="seconds"),
+            "time": self._now_iso(),
+            "diff": [],
         }
 
     def check_replacement(self, candidate: Program) -> None:
@@ -1128,12 +1295,16 @@ class VM:
         candidate = Program(source)
         self.check_replacement(candidate)
 
+        before = dict(self.program.source)
         old = self.source_record(description)
         self.install_source(candidate)
-
+        after = dict(self.program.source)
+        self.audit_mutation(description, before, after)
+        old["diff"] = [{"line": line, "before": before.get(line), "after": after.get(line)} for line in sorted(set(before) | set(after))]
         self.undo_stack.append(old)
         self.undo_stack = self.undo_stack[-self.history_limit:]
         self.redo_stack.clear()
+        self.emit_event("mutate", description=description, before=before, after=after)
 
     def undo(self, count: int = 1, redo: bool = False) -> None:
         count = int(count)
@@ -1676,6 +1847,7 @@ class VM:
             if number <= 0 or number in self.files:
                 raise BasicError("Неверный или занятый номер файла")
             mode = {"INPUT": "r", "OUTPUT": "w", "APPEND": "a"}[mode.upper()]
+            self._check_fs_access(str(self.evaluate(path)), operation="write" if mode in ("w", "a") else "read")
             self.files[number] = open(
                 str(self.evaluate(path)), mode, encoding="utf-8", newline=""
             )
@@ -1706,15 +1878,19 @@ class VM:
             if len(args) != 2:
                 raise BasicError(f"{command} требует два аргумента")
             if command == "COPYFILE":
+                self._check_fs_access(args[0], operation="read")
+                self._check_fs_access(args[1], operation="write")
                 shutil.copy2(args[0], args[1])
             else:
                 mode = "w" if command == "WRITEFILE" else "a"
+                self._check_fs_access(args[0], operation="write")
                 with open(args[0], mode, encoding="utf-8") as handle:
                     handle.write(str(args[1]))
             return
 
         if command in ("CHDIR", "MKDIR", "RMDIR", "KILL"):
             path = str(self.evaluate(body))
+            self._check_fs_access(path, operation="write")
             {
                 "CHDIR": os.chdir, "MKDIR": os.mkdir,
                 "RMDIR": os.rmdir, "KILL": os.remove,
@@ -1725,10 +1901,11 @@ class VM:
             at = keyword(body, "AS")
             if at < 0:
                 raise BasicError("NAME old AS new")
-            os.rename(
-                str(self.evaluate(body[:at])),
-                str(self.evaluate(body[at + 2:])),
-            )
+            left = str(self.evaluate(body[:at]))
+            right = str(self.evaluate(body[at + 2:]))
+            self._check_fs_access(left, operation="write")
+            self._check_fs_access(right, operation="write")
+            os.rename(left, right)
             return
 
         if command == "ENVIRON":
@@ -1792,7 +1969,7 @@ class VM:
 
         raise BasicError(f"Неизвестная или неподдерживаемая инструкция: {text}")
 
-    def run(self, count: int | None = None, limit: int = 1_000_000, trace=False):
+    def run(self, count: int | None = None, limit: int = 1_000_000, trace=False, trace_json: bool = False, trace_stream=None):
         if self.state == "ended":
             return
 
@@ -1800,6 +1977,7 @@ class VM:
         self.state = "running"
         self.execution_started = time.monotonic()
         executed = 0
+        trace_stream = sys.stderr if trace_stream is None else trace_stream
 
         try:
             while self.pc != ADDRESS_END and self.state == "running":
@@ -1810,17 +1988,44 @@ class VM:
 
                 instruction = self.program.instruction(address)
                 line, ordinal = address
+                event = {
+                    "event": "step",
+                    "line": line,
+                    "ordinal": ordinal,
+                    "instruction": instruction.text,
+                    "pc": list(self.pc),
+                    "state": self.state,
+                    "ts": self._now_iso(),
+                }
+                self.trace_events.append(event)
+                self.emit_event("step", **{k: v for k, v in event.items() if k != "event"})
 
                 if (
                     count is None
                     and ordinal == 0
                     and line in self.breakpoints
                     and self.break_address != address
+                    and not self.break_conditions.get(line, "")
                 ):
                     self.pc = address
                     self.break_address = address
                     self.state = "paused"
                     break
+
+                if (
+                    count is None
+                    and ordinal == 0
+                    and line in self.breakpoints
+                    and self.break_conditions.get(line)
+                ):
+                    try:
+                        if bool(self.evaluate(self.break_conditions[line])):
+                            self.pc = address
+                            self.break_address = address
+                            self.state = "paused"
+                            break
+                    except Exception:
+                        pass
 
                 self.break_address = None
 
@@ -1833,6 +2038,8 @@ class VM:
 
                 if trace:
                     print(f"[{line}:{ordinal}] {instruction.text}", file=sys.stderr)
+                if trace_json:
+                    print(json.dumps(event, ensure_ascii=False), file=trace_stream)
 
                 try:
                     self.execute(instruction.text, address)
@@ -2199,7 +2406,10 @@ CHECK                      Проверить структуру блоков
 RUN [номер|метка]           Новый запуск, переменные очищаются
 CONT                       Продолжить
 STEP [n]                   Исполнить n инструкций
-BREAK [номера]             Добавить/показать точки останова
+WHERE / STACK / WATCH expr Отладка и стек вызовов
+BREAK [номера] [WHEN expr] Точки останова и условия
+CHECKPOINT [имя]           Сохранить именованную точку восстановления
+ROLLBACK [имя|индекс]      Восстановить контрольную точку
 UNBREAK [номера]           Удалить точки, без аргументов — все
 VARS                       Переменные и массивы
 SYS                        Системные показатели
