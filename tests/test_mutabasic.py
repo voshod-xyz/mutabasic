@@ -1,4 +1,6 @@
 import unittest
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -52,6 +54,16 @@ class MutaBasicTests(unittest.TestCase):
         shell = __import__("mutabasic_pkg").Shell(VM())
         shell.command("MARK ready")
         self.assertEqual(seen, ["ready"])
+
+    def test_builtin_help_documents_shell_policy_and_line_numbers(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            __import__("mutabasic_pkg").Shell(VM()).command("HELP files")
+            __import__("mutabasic_pkg").Shell(VM()).command("HELP source")
+        text = output.getvalue()
+        self.assertIn("--allow-shell-command", text)
+        self.assertIn("Цепочки", text)
+        self.assertIn("повторные номера запрещены", text)
 
     def test_shell_policy_is_explicit_and_restrictable(self):
         with self.assertRaises(BasicError):
