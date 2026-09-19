@@ -28,6 +28,36 @@ muta> SAVE hello.bas
 
 Команды и имена переменных регистронезависимы. Содержимое строк сохраняет регистр; правила путей и переменных окружения определяются ОС.
 
+## Установка и структура проекта
+
+Для запуска из клонированного репозитория достаточно Python 3.10 или новее:
+
+```bash
+python mutabasic.py --self-test
+```
+
+Проект также содержит `pyproject.toml`, поэтому его можно установить в
+окружение в режиме editable для встраивания:
+
+```bash
+python -m pip install -e .
+```
+
+Основные файлы:
+
+| Путь | Назначение |
+|---|---|
+| `mutabasic.py` | Совместимый CLI-фасад |
+| `mutabasic_pkg/core.py` | VM, компиляция листинга и REPL |
+| `mutabasic_pkg/api.py` | API для Python-приложений |
+| `mutabasic_pkg/parser.py` | Текущая parsing-абстракция |
+| `mutabasic_pkg/registry.py` | Реестр пользовательских функций и команд |
+| `mutabasic_pkg/security.py` | Политика выполнения shell-команд |
+| `tests/` | Регрессионные тесты на `unittest` |
+
+Публичные имена экспортируются из `mutabasic_pkg`, поэтому приложениям не
+нужно импортировать внутренний модуль `core`.
+
 ## Зачем нужен MutaBasic
 
 - Эксперименты с самомодифицирующимися программами.
@@ -301,19 +331,77 @@ app = MutaBasic(shell_policy=ShellPolicy(
 app.load({10: 'PRINT "embedded"', 20: "END"}).run()
 ```
 
+Методы `load()` и `run()` возвращают объект `MutaBasic`, поэтому вызовы можно
+связывать. Для выполнения непосредственной BASIC-инструкции используйте
+`execute()`, а для чтения значения выражения — `evaluate()`:
+
+```python
+from mutabasic_pkg import MutaBasic
+
+app = MutaBasic().load({
+    10: 'message$ = "hello"',
+    20: 'END',
+})
+app.run()
+assert app.evaluate("message$") == "hello"
+app.execute('PRINT message$')
+app.close()
+```
+
 Функции и команды можно добавлять без изменения интерпретатора:
 `register_function("NAME", callable)` и `register_command("NAME",
 handler(shell, argument))`. `parse_source()` и `tokenize()` являются
 текущей parsing-абстракцией; полноценный AST остаётся отдельным этапом.
+Регистрация действует для VM, созданных после регистрации:
+
+```python
+from mutabasic_pkg import VM, register_function
+
+register_function("TRIPLE", lambda value: value * 3)
+vm = VM()
+assert vm.evaluate("TRIPLE(7)") == 21
+```
 
 ## Политика безопасности
 
 `--allow-shell` сохраняет прежний явный opt-in. Для встраивания рекомендуется
 `ShellPolicy(enabled=True, commands=frozenset({...}))`, ограничивающая
-исполняемые команды на уровне проекта/VM. Это не sandbox: BASIC по-прежнему
+исполняемые команды на уровне проекта/VM. В CLI allow-list задаётся повторяемым
+параметром:
+
+```bash
+python mutabasic.py --allow-shell \
+  --allow-shell-command echo \
+  --allow-shell-command printf
+```
+
+Если указан хотя бы один `--allow-shell-command`, только перечисленные имена
+исполняемых файлов проходят проверку. Это не sandbox: BASIC по-прежнему
 может читать и изменять доступные процессу файлы, поэтому используйте
 отдельную ОС-пользовательскую учётную запись или контейнер для недоверенного
 кода.
+
+Политика применяется и к `SHELL`, и к `SHELL$`; она не восстанавливается из
+снимка и не даёт изоляции файловой системы. Для более строгого контроля
+запускайте интерпретатор в отдельном процессе с ограниченными правами.
+
+## Тестирование
+
+Быстрая встроенная проверка:
+
+```bash
+python mutabasic.py --self-test
+```
+
+Регрессионный набор:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Набор проверяет API, выражения и исполнение программ, parsing-фасад, реестры
+расширений и shell-политику. При добавлении новой инструкции или функции
+добавляйте отдельный позитивный и негативный сценарий.
 
 ## Дорожная карта
 
