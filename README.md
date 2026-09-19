@@ -209,6 +209,28 @@ PRINT TIMERGET("work")
 
 `ELAPSED` учитывает время исполнения, включая INPUT/SLEEP, но не паузы REPL. Именованные таймеры считают монотонное реальное время, включая паузы, пока не остановлены.
 
+## Встроенные функции
+
+Интерпретатор предоставляет следующие группы функций:
+
+| Группа | Функции |
+|---|---|
+| Математика | `ABS`, `ATN`, `COS`, `SIN`, `TAN`, `SQR`, `EXP`, `LOG`, `INT`, `FIX`, `CINT`, `CLNG`, `CSNG`, `CDBL`, `SGN`, `MIN`, `MAX`, `ROUND`, `FLOOR`, `CEIL`, `RND` |
+| Строки | `LEN`, `ASC`, `CHR$`, `STR$`, `VAL`, `HEX$`, `OCT$`, `LEFT$`, `RIGHT$`, `MID$`, `LCASE$`, `UCASE$`, `LTRIM$`, `RTRIM$`, `SPACE$`, `STRING$`, `INSTR`, `TAB`, `SPC`, `INKEY$` |
+| Массивы и переменные | `LBOUND`, `UBOUND`, `VAREXISTS` |
+| Листинг и система | `LINE$`, `LINEEXISTS`, `FINDLINE`, `TIMERGET`, `SYS`, `SYS$`, `ENVIRON$` |
+| Файлы | `FILEEXISTS`, `DIREXISTS`, `FILESIZE`, `READFILE$`, `EOF`, `LOF`, `LOC`, `SEEK` |
+| Оболочка | `SHELL`, `SHELL$` |
+
+Номера измерений массивов начинаются с 1. `LBOUND` и `UBOUND` принимают
+необязательный номер измерения; при первом обращении массив автоматически
+создаётся до индекса 10. Неинициализированные числовые переменные равны `0`,
+строковые — `""`.
+
+`SHELL(command$)` возвращает код завершения команды, а `SHELL$(command$)` —
+перехваченный stdout. Обе функции подчиняются текущей `ShellPolicy`; stderr
+не добавляется к возвращаемому stdout.
+
 ## Файлы и команды ОС
 
 ```basic
@@ -347,6 +369,12 @@ assert app.evaluate("message$") == "hello"
 app.execute('PRINT message$')
 app.close()
 ```
+
+`create_vm()` создаёт низкоуровневый `VM`; параметр `allow_shell=True` включает
+совместимый режим разрешения оболочки, а `shell_policy=ShellPolicy(...)`
+позволяет задать явный allow-list исполняемых файлов. `MutaBasic.close()`
+закрывает открытые BASIC-файлы и должен вызываться после завершения работы с
+VM.
 
 Функции и команды можно добавлять без изменения интерпретатора:
 `register_function("NAME", callable)` и `register_command("NAME",
