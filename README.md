@@ -250,6 +250,7 @@ python mutabasic.py -e "EVAL 2^10"
 | `--project`, `--restore` | Загрузка проекта или снимка |
 | `--name`, `--cwd` | Имя проекта и рабочая папка |
 | `--allow-shell` | Разрешить команды ОС |
+| `--allow-shell-command` | Повторяемый allow-list executable после `--allow-shell` |
 | `--max-steps` | Лимит инструкций на RUN/CONT; 0 — без лимита |
 | `--history-limit` | Глубина истории |
 | `--trace` | Трассировка в stderr |
@@ -278,7 +279,48 @@ python mutabasic.py --self-test
 python mutabasic.py example.bas --check
 ```
 
-Smoke-тесты покрывают несколько сценариев выражений, массивов, циклов, самомодификации, истории, файлов и сохранения состояния. Это не полный набор тестов.
+Smoke-тесты покрывают несколько сценариев выражений, массивов, циклов, самомодификации, истории, файлов и сохранения состояния. Дополнительный регрессионный набор запускается без зависимостей:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Архитектура и встраивание
+
+`mutabasic.py` теперь является совместимым CLI-фасадом. Реализация находится в
+`mutabasic_pkg`: `core.py` содержит VM/REPL (поэтапно выделяемый legacy-слой),
+`parser.py` предоставляет стабильную parsing-связь для будущего AST,
+`security.py` — политики shell, `registry.py` — расширения, а `api.py` —
+небольшой Python API:
+
+```python
+from mutabasic_pkg import MutaBasic, ShellPolicy
+app = MutaBasic(shell_policy=ShellPolicy(
+    enabled=True, commands=frozenset({"echo"})
+))
+app.load({10: 'PRINT "embedded"', 20: "END"}).run()
+```
+
+Функции и команды можно добавлять без изменения интерпретатора:
+`register_function("NAME", callable)` и `register_command("NAME",
+handler(shell, argument))`. `parse_source()` и `tokenize()` являются
+текущей parsing-абстракцией; полноценный AST остаётся отдельным этапом.
+
+## Политика безопасности
+
+`--allow-shell` сохраняет прежний явный opt-in. Для встраивания рекомендуется
+`ShellPolicy(enabled=True, commands=frozenset({...}))`, ограничивающая
+исполняемые команды на уровне проекта/VM. Это не sandbox: BASIC по-прежнему
+может читать и изменять доступные процессу файлы, поэтому используйте
+отдельную ОС-пользовательскую учётную запись или контейнер для недоверенного
+кода.
+
+## Дорожная карта
+
+- выделить компиляцию выражений и исполнения инструкций в отдельные модули;
+- заменить текущую parsing-абстракцию формальной грамматикой и AST;
+- расширить policy до allow-list путей и безопасного запуска без `shell=True`;
+- наращивать совместимость BASIC и покрытие тестами.
 
 При сообщении о проблеме приложите:
 
