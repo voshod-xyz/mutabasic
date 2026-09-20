@@ -87,6 +87,18 @@ class MutaBasicTests(unittest.TestCase):
         vm.rollback("before")
         self.assertEqual(vm.evaluate("x"), 1)
 
+    def test_listing_edit_counter_is_readonly_and_persisted(self):
+        vm = VM()
+        self.assertEqual(vm.evaluate("LISTINGEDITS"), 0)
+        vm.mutate({10: "x=1"}, "test edit")
+        self.assertEqual(vm.evaluate("LISTINGEDITS"), 1)
+        vm.mutate({10: "x=2"}, "test edit")
+        self.assertEqual(vm.evaluate("LISTINGEDITS"), 2)
+        vm.undo()
+        self.assertEqual(vm.evaluate("LISTINGEDITS"), 3)
+        vm.undo(redo=True)
+        self.assertEqual(vm.evaluate("LISTINGEDITS"), 4)
+
     def test_seeded_randomize_and_nested_loops(self):
         source = {
             10: "RANDOMIZE 42",

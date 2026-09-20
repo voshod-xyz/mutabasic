@@ -726,6 +726,7 @@ class VM:
 
         self.state = "ready"
         self.run_count = 0
+        self.listing_edits = 0
         self.steps = 0
         self.total_steps = 0
         self.launch_count = launch_count
@@ -768,7 +769,8 @@ class VM:
             "RUNCOUNT", "LAUNCHCOUNT", "STEPS", "TOTALSTEPS", "UPTIME",
             "ELAPSED", "FREEDISK", "TOTALDISK", "CURRENTLINE", "NEXTLINE",
             "CALLDEPTH", "LOOPDEPTH", "DATAPOS", "LINECOUNT", "HISTORYCOUNT",
-            "REDOCOUNT", "LASTEXIT", "LASTOUTPUT$", "LASTERROR$", "ERRORLINE",
+            "REDOCOUNT", "LISTINGEDITS", "LASTEXIT", "LASTOUTPUT$",
+            "LASTERROR$", "ERRORLINE",
             "CWD$", "PROJECT$", "STATE$", "VERSION$", "PID",
         }
 
@@ -952,6 +954,7 @@ class VM:
             "LINECOUNT": lambda: len(self.program.source),
             "HISTORYCOUNT": lambda: len(self.undo_stack),
             "REDOCOUNT": lambda: len(self.redo_stack),
+            "LISTINGEDITS": lambda: self.listing_edits,
             "LASTEXIT": lambda: self.last_exit,
             "LASTOUTPUT$": lambda: self.last_output,
             "LASTERROR$": lambda: self.last_error,
@@ -1375,6 +1378,7 @@ class VM:
         old = self.source_record(description)
         self.install_source(candidate)
         after = dict(self.program.source)
+        self.listing_edits += 1
         self.audit_mutation(description, before, after)
         old["diff"] = [{"line": line, "before": before.get(line), "after": after.get(line)} for line in sorted(set(before) | set(after))]
         self.undo_stack.append(old)
@@ -1406,6 +1410,7 @@ class VM:
 
         destination_stack[:] = destination_stack[-self.history_limit:]
         self.install_source(candidate)
+        self.listing_edits += 1
 
     def source_statement(self, body: str) -> None:
         pieces = body.split(None, 1)
@@ -2320,6 +2325,7 @@ class VM:
             "undo": copy.deepcopy(self.undo_stack),
             "redo": copy.deepcopy(self.redo_stack),
             "run_count": self.run_count,
+            "listing_edits": self.listing_edits,
         }
 
     def save_project(self, path: str) -> None:
@@ -2335,6 +2341,9 @@ class VM:
         self.program = Program({int(k): v for k, v in obj["source"].items()})
         self.project_name = str(obj.get("name", "untitled"))
         self.run_count = int(obj.get("run_count", 0))
+        self.listing_edits = int(obj.get("listing_edits", 0))
+        if self.listing_edits < 0:
+            raise BasicError("Некорректный счётчик правок листинга")
 
         for attribute, key in (("undo_stack", "undo"), ("redo_stack", "redo")):
             records = []
@@ -2630,11 +2639,12 @@ PROGRAM$                      Полный нумерованный листин
   VERSION$ PROJECT$ CWD$ STATE$ DATE$ TIME$ TIMER PI TRUE FALSE
   RUNCOUNT LAUNCHCOUNT STEPS TOTALSTEPS UPTIME ELAPSED
   FREEDISK TOTALDISK CURRENTLINE NEXTLINE PID
-  CALLDEPTH LOOPDEPTH DATAPOS LINECOUNT HISTORYCOUNT REDOCOUNT
+  CALLDEPTH LOOPDEPTH DATAPOS LINECOUNT HISTORYCOUNT REDOCOUNT LISTINGEDITS
   LASTEXIT LASTOUTPUT$ LASTERROR$ ERRORLINE PROGRAM$
 
 RUNCOUNT — число RUN проекта; хранится в проекте и снимках.
 LAUNCHCOUNT — число запусков процесса, хранимое в файле состояния.
+LISTINGEDITS — число успешных изменений листинга, включая UNDO/REDO.
 STEPS — выполненные инструкции текущего RUN.
 TOTALSTEPS — общий счётчик VM, сохраняется в снимке.
 ELAPSED — время исполнения VM, включая INPUT/SLEEP, без пауз REPL.

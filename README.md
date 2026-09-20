@@ -208,7 +208,7 @@ muta> BASIC RESTORE
 - Время: `DATE$`, `TIME$`, `TIMER`, `UPTIME`, `ELAPSED`.
 - Счётчики: `RUNCOUNT`, `LAUNCHCOUNT`, `STEPS`, `TOTALSTEPS`.
 - Исполнение: `CURRENTLINE`, `NEXTLINE`, `CALLDEPTH`, `LOOPDEPTH`, `DATAPOS`.
-- Листинг: `LINECOUNT`, `HISTORYCOUNT`, `REDOCOUNT`, `PROGRAM$`.
+- Листинг: `LINECOUNT`, `HISTORYCOUNT`, `REDOCOUNT`, `LISTINGEDITS`, `PROGRAM$`.
 - Диск: `FREEDISK`, `TOTALDISK` — байты на диске рабочей папки.
 - Диагностика: `LASTEXIT`, `LASTOUTPUT$`, `LASTERROR$`, `ERRORLINE`.
 
@@ -223,6 +223,10 @@ PRINT TIMERGET("work")
 ```
 
 `RUNCOUNT` хранится в проекте и снимках. `LAUNCHCOUNT` хранится в отдельном файле состояния пользователя; `--no-state` отключает его сохранение. Обновление счётчика не синхронизировано между одновременно запускаемыми процессами.
+
+`LISTINGEDITS` считает успешные изменения листинга, включая редактирование
+через REPL/API, инструкции `SOURCE` и операции `UNDO`/`REDO`. Счётчик
+сохраняется в JSON-проектах и снимках и доступен только для чтения.
 
 `ELAPSED` учитывает время исполнения, включая INPUT/SLEEP, но не паузы REPL. Именованные таймеры считают монотонное реальное время, включая паузы, пока не остановлены.
 
