@@ -49,7 +49,7 @@ from .security import ShellPolicy
 
 
 NAME = "MutaBasic"
-VERSION = "0.701"
+VERSION = "0.702"
 FORMAT_VERSION = 1
 
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*[$%!#&]?"
@@ -2604,7 +2604,7 @@ class VM:
 HELP = {
     "": """
 MutaBasic
-  версия 0.701
+  версия 0.702
   HELP commands    Команды оболочки
   HELP language    Операторы BASIC и ограничения
   HELP source      Изменение собственного листинга
@@ -2623,6 +2623,11 @@ MutaBasic
   :LIST
 BASIC принудительно исполняется через:
   BASIC RESTORE
+
+CLI-справка:
+python mutabasic.py --help
+python mutabasic.py --version
+python mutabasic.py --self-test
 """,
     "commands": """
 NEW [имя]                  Новый пустой проект в памяти
@@ -3310,11 +3315,32 @@ def self_test() -> None:
     print(f"{NAME}: {checks} checks passed.")
 
 
+class MutaBasicHelpFormatter(
+    argparse.ArgumentDefaultsHelpFormatter,
+    argparse.RawDescriptionHelpFormatter,
+):
+    """Keep defaults while preserving the CLI help examples layout."""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mutabasic",
-        description="Консольный BASIC с изменяемым собственным листингом.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "MutaBasic 0.702 — консольный BASIC с изменяемым листингом.\n"
+            "Без файла открывается REPL; --no-run загружает программу без запуска."
+        ),
+        epilog=(
+            "Примеры:\n"
+            "  mutabasic example.bas\n"
+            "  mutabasic example.bas --no-run -i\n"
+            "  mutabasic --project example.mbp --trace-json\n"
+            "  mutabasic -e \"HELP commands\"\n"
+            "\n"
+            "Темы REPL: HELP commands, language, source, system, files,\n"
+            "snapshots, functions. Для полного описания возможностей используйте\n"
+            "HELP без аргумента после запуска интерактивного режима."
+        ),
+        formatter_class=MutaBasicHelpFormatter,
     )
     parser.add_argument("program", nargs="?", help="Файл .bas")
     parser.add_argument("-i", "--interactive", action="store_true",

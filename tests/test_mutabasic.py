@@ -25,6 +25,9 @@ class MutaBasicTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("usage:", result.stdout)
+        self.assertIn("Примеры:", result.stdout)
+        self.assertIn("Темы REPL:", result.stdout)
+        self.assertIn("--self-test", result.stdout)
 
     def test_expression_and_program_execution(self):
         app = MutaBasic().load({10: "x=2^3", 20: "END"}).run()
