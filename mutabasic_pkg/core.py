@@ -435,6 +435,8 @@ class Expression:
 
                 if token in self.vm.functions:
                     left = self.vm.functions[token](*args)
+                elif token in self.vm.program.routines:
+                    left = self.vm.user_function(token, args)
                 else:
                     left = self.vm.array_get(token, args)
             else:
@@ -520,6 +522,7 @@ class Program:
         self.data: list[Value] = []
         self.data_at: dict[Address, int] = {}
         self.incomplete: list[str] = []
+        self.routines: dict[str, dict] = {}
 
         self.compile()
 
@@ -527,6 +530,8 @@ class Program:
     def block_kind(text: str) -> tuple[str, str] | None:
         upper = text.upper()
 
+        if re.fullmatch(r"(SUB|FUNCTION)\s+" + IDENT + r"\s*(?:\(.*\))?", text, re.I):
+            return "open", "ROUTINE"
         if re.fullmatch(r"IF\s+.+\s+THEN", upper):
             return "open", "IF"
         if upper.startswith("FOR "):
@@ -544,6 +549,8 @@ class Program:
             return "close", "WHILE"
         if upper == "LOOP" or upper.startswith("LOOP "):
             return "close", "DO"
+        if re.fullmatch(r"END\s+(SUB|FUNCTION)", upper):
+            return "close", "ROUTINE"
 
         return None
 
@@ -612,6 +619,15 @@ class Program:
                     _, opening = stack.pop()
                     self.pairs[opening] = address
                     self.pairs[address] = opening
+                    if kind == "ROUTINE":
+                        header = self.instruction(opening).text
+                        match = re.match(r"(?:SUB|FUNCTION)\s+(" + IDENT + r")\s*(?:\((.*)\))?", header, re.I)
+                        if match:
+                            params = [canonical(x.strip()) for x in split_outside(match.group(2) or "") if x.strip()]
+                            self.routines[canonical(match.group(1))] = {
+                                "kind": header.split(None, 1)[0].upper(),
+                                "start": opening, "end": address, "params": params,
+                            }
 
         for kind, address in stack:
             self.incomplete.append(f"{address[0]}: не закрыт блок {kind}")
@@ -703,6 +719,9 @@ class VM:
         self.current: Address | None = None
         self.calls: list[Address] = []
         self.loops: list[dict] = []
+        self.routine_depth = 0
+        self.max_routine_depth = 100
+        self._routine_return = False
         self.data_pointer = 0
 
         self.state = "ready"
@@ -1041,6 +1060,42 @@ class VM:
             self.last_random = self.rng.random()
         return self.last_random
 
+    def user_function(self, name: str, args: list[Value]) -> Value:
+        routine = self.program.routines.get(canonical(name))
+        if not routine:
+            raise BasicError(f"Неизвестная функция: {name}")
+        if routine["kind"] != "FUNCTION":
+            raise BasicError(f"{name}: это SUB, а не FUNCTION")
+        if len(args) != len(routine["params"]):
+            raise BasicError(f"{name}: ожидалось {len(routine['params'])} аргументов")
+        if self.routine_depth >= self.max_routine_depth:
+            raise BasicError("Превышена глубина рекурсии")
+        saved = (self.pc, self.current, self.state, self.calls, self.loops, self._routine_return)
+        self.routine_depth += 1
+        self._routine_return = False
+        self.calls, self.loops = [], []
+        for param, value in zip(routine["params"], args):
+            self.assign(param, value)
+        result = self.default(canonical(name))
+        self.pc = self.program.after(routine["start"])
+        self.state = "running"
+        try:
+            while self.pc != ADDRESS_END and self.pc <= routine["end"]:
+                address = self.program.at_or_after(self.pc)
+                if address == routine["end"]:
+                    break
+                self.pc = self.program.after(address)
+                self.execute(self.program.instruction(address).text, address)
+                if self._routine_return:
+                    break
+                if self.state in ("ended", "paused"):
+                    break
+            result = self.variable_get(name)
+        finally:
+            self.pc, self.current, self.state, self.calls, self.loops, self._routine_return = saved
+            self.routine_depth -= 1
+        return result
+
     @staticmethod
     def inkey() -> str:
         if os.name == "nt":
@@ -1113,6 +1168,17 @@ class VM:
             )
             return numeric_literal(match.group()) if match else 0
 
+        def replace_text(text, old, new, sensitive=0):
+            if not old:
+                raise BasicError("REPLACE$: образец не может быть пуст")
+            flags = 0 if bool(sensitive) else re.I
+            return re.sub(re.escape(str(old)), str(new), str(text), flags=flags)
+
+        def field_text(text, index, separator=","):
+            parts = split_outside(str(text), str(separator)[:1] or ",")
+            index = int(index)
+            return parts[index - 1] if 1 <= index <= len(parts) else ""
+
         def sys_value(key):
             key = canonical(str(key))
             aliases = {
@@ -1149,6 +1215,21 @@ class VM:
             "OCT$": lambda n: format(int(n), "o"),
             "LEFT$": lambda s, n: s[:length(n)],
             "RIGHT$": right, "MID$": mid,
+            "TRIM$": lambda s: str(s).strip(),
+            "REPLACE$": replace_text,
+            "FIELD$": field_text,
+            "STARTSWITH": lambda s, prefix, sensitive=0: -int(
+                str(s).startswith(str(prefix)) if sensitive else
+                str(s).casefold().startswith(str(prefix).casefold())
+            ),
+            "ENDSWITH": lambda s, suffix, sensitive=0: -int(
+                str(s).endswith(str(suffix)) if sensitive else
+                str(s).casefold().endswith(str(suffix).casefold())
+            ),
+            "CONTAINS": lambda s, needle, sensitive=0: -int(
+                str(needle) in str(s) if sensitive else
+                str(needle).casefold() in str(s).casefold()
+            ),
             "LCASE$": lambda s: s.lower(),
             "UCASE$": lambda s: s.upper(),
             "LTRIM$": lambda s: s.lstrip(),
@@ -1565,6 +1646,44 @@ class VM:
         command = first.group().upper() if first else ""
         body = text[len(command):].strip()
 
+        if command in ("SUB", "FUNCTION"):
+            address = self.require_program(address)
+            self.pc = self.program.after(self.paired(address))
+            return
+        if upper in ("END SUB", "END FUNCTION"):
+            self._routine_return = True
+            return
+        if command == "CALL":
+            match = re.fullmatch(r"(" + IDENT + r")\s*(?:\((.*)\))?", body, re.I)
+            if not match:
+                raise BasicError("CALL имя[(аргументы)]")
+            name, raw_args = match.groups()
+            routine = self.program.routines.get(canonical(name))
+            if not routine or routine["kind"] != "SUB":
+                raise BasicError(f"Неизвестный SUB: {name}")
+            args = [self.evaluate(x) for x in split_outside(raw_args)] if raw_args else []
+            if len(args) != len(routine["params"]):
+                raise BasicError(f"{name}: ожидалось {len(routine['params'])} аргументов")
+            if self.routine_depth >= self.max_routine_depth:
+                raise BasicError("Превышена глубина рекурсии")
+            self.routine_depth += 1
+            previous_return = self._routine_return
+            self._routine_return = False
+            try:
+                for param, value in zip(routine["params"], args):
+                    self.assign(param, value)
+                address = self.program.after(routine["start"])
+                while address != routine["end"]:
+                    self.pc = self.program.after(address)
+                    self.execute(self.program.instruction(address).text, address)
+                    if self._routine_return:
+                        break
+                    address = self.program.at_or_after(self.pc)
+            finally:
+                self._routine_return = previous_return
+                self.routine_depth -= 1
+            return
+
         if command == "PRINT":
             self.print_statement(body)
             return
@@ -1643,6 +1762,9 @@ class VM:
             return
 
         if upper == "RETURN":
+            if self.routine_depth:
+                self._routine_return = True
+                return
             if not self.calls:
                 raise BasicError("RETURN без GOSUB")
             self.pc = self.program.at_or_after(self.calls.pop())
@@ -1718,19 +1840,35 @@ class VM:
 
         if command == "WHILE":
             address = self.require_program(address)
+            active = next((frame for frame in reversed(self.loops)
+                           if frame["kind"] == "WHILE" and frame["start"] == address), None)
             if not self.evaluate(body):
+                if active:
+                    self.loops.remove(active)
                 self.pc = self.program.after(self.paired(address))
+            elif not active:
+                self.loops.append({"kind": "WHILE", "start": address})
             return
 
         if upper == "WEND":
-            self.pc = self.paired(self.require_program(address))
+            address = self.require_program(address)
+            if not self.loops or self.loops[-1]["kind"] != "WHILE":
+                raise BasicError("WEND без активного WHILE")
+            frame = self.loops[-1]
+            if self.paired(address) != frame["start"]:
+                raise BasicError("WEND не соответствует активному WHILE")
+            self.pc = frame["start"]
             return
 
         if command == "DO":
             address = self.require_program(address)
+            active = next((frame for frame in reversed(self.loops)
+                           if frame["kind"] == "DO" and frame["start"] == address), None)
             if not self.suffix_condition(body):
                 self.pc = self.program.after(self.paired(address))
-            else:
+                if active:
+                    self.loops.remove(active)
+            elif not active:
                 self.loops.append({"kind": "DO", "start": address})
             return
 
@@ -1747,7 +1885,7 @@ class VM:
                 self.pc = frame["start"]
             return
 
-        if upper in ("EXIT FOR", "EXIT DO"):
+        if upper in ("EXIT FOR", "EXIT DO", "EXIT WHILE"):
             kind = upper.split()[1]
             for index in range(len(self.loops) - 1, -1, -1):
                 frame = self.loops[index]
@@ -1826,7 +1964,10 @@ class VM:
             return
 
         if command == "RANDOMIZE":
-            self.rng.seed(self.evaluate(body) if body else time.time_ns())
+            seed = self.evaluate(body) if body else time.time_ns()
+            self.seed = seed
+            self.rng.seed(seed)
+            self.last_random = 0.0
             return
 
         if command == "OPEN":
@@ -2394,7 +2535,7 @@ EDIT номер текст           Добавить/заменить стро�
 INSERT номер текст         Добавить строку; номер должен быть свободен
 DELETE от [до]             Удалить строки
 FIND текст                 Поиск без учёта регистра
-REPLACE "что" "на что"      Замена по всему листингу без учёта регистра
+REPLACE "что" "на что" [от до] [--case-sensitive]
 UNDO [n] / REDO [n]         Отмена/повтор изменений листинга
 HISTORY                    История изменений
 CHECK                      Проверить структуру блоков
@@ -2433,12 +2574,14 @@ FOR i=start TO end [STEP value] / NEXT [i]
 WHILE expr / WEND
 DO [WHILE|UNTIL expr] / LOOP [WHILE|UNTIL expr]
 EXIT FOR / EXIT DO
+EXIT WHILE
 GOTO target / GOSUB target / RETURN
 ON expr GOTO targets / ON expr GOSUB targets
 DIM a(10), b(1 TO 5, 2 TO 8)
 OPTION BASE 0|1 / ERASE a,b / SWAP a,b
 DATA values / READ variables / RESTORE [target]
 RANDOMIZE [seed]
+SUB name(args) ... END SUB / FUNCTION name(args) ... END FUNCTION
 STOP / END / SYSTEM / CLS / BEEP / SLEEP [seconds]
 REM comment / ' comment
 Метки: label: PRINT "hello"
@@ -2449,9 +2592,10 @@ REM comment / ' comment
 AND OR XOR NOT EQV IMP — побитовые операции, без short circuit.
 ^ — степень; \\ — целочисленное деление; MOD — остаток.
 
-Нет SUB/FUNCTION/TYPE, SELECT CASE, ELSEIF, ON ERROR,
+Нет TYPE, SELECT CASE, ELSEIF, ON ERROR,
 PRINT USING, графики, двоичных и RANDOM-файлов.
-Нет вложенного однострочного IF и NEXT i,j.
+Нет вложенного однострочного IF и NEXT i,j. SUB/FUNCTION имеют общую
+область переменных и ограничение глубины рекурсии.
 Не эмулируются переполнения и точные численные типы QBasic.
 Произвольный GOTO через границы активных циклов не очищает их стеки.
 """,
@@ -2717,15 +2861,26 @@ class Shell:
                 raise BasicError("DELETE от [до]")
             vm.source_statement("DELETE " + ",".join(map(str, bounds)))
         elif command == "FIND":
-            needle = path_argument(argument).casefold()
+            args = shlex.split(argument)
+            sensitive = "--case-sensitive" in args or "-s" in args
+            args = [x for x in args if x not in ("--case-sensitive", "-s")]
+            if not args:
+                raise BasicError("FIND текст [--case-sensitive]")
+            needle = args[0] if sensitive else args[0].casefold()
             for number, text in vm.program.source.items():
-                if needle in text.casefold():
+                haystack = text if sensitive else text.casefold()
+                if needle in haystack:
                     print(f"{number} {text}")
         elif command == "REPLACE":
             args = shlex.split(argument)
-            if len(args) != 2:
-                raise BasicError('REPLACE "что" "на что"')
-            quoted = ['"' + item.replace('"', '""') + '"' for item in args]
+            sensitive = "--case-sensitive" in args or "-s" in args
+            args = [x for x in args if x not in ("--case-sensitive", "-s")]
+            if len(args) not in (2, 4):
+                raise BasicError('REPLACE "что" "на что" [от до] [--case-sensitive]')
+            quoted = ['"' + item.replace('"', '""') + '"' for item in args[:2]]
+            if len(args) == 4:
+                quoted.extend(args[2:4])
+            quoted.append("-1" if sensitive else "0")
             vm.source_statement("REPLACE " + ",".join(quoted))
         elif command in ("UNDO", "REDO"):
             vm.undo(int(argument or 1), redo=command == "REDO")
