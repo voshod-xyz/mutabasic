@@ -129,6 +129,44 @@ class MutaBasicTests(unittest.TestCase):
         self.assertEqual(app.evaluate("x"), 120)
         self.assertEqual(app.evaluate("s$"), "X X")
 
+    def test_procedure_parameters_are_recursion_safe_and_local(self):
+        app = MutaBasic().load({
+            10: "FUNCTION F(n)",
+            20: "IF n<=0 THEN F=0:END FUNCTION",
+            30: "F=n+F(n-1)",
+            40: "END FUNCTION",
+            50: "x=F(4)",
+            60: "END",
+        }).run()
+        self.assertEqual(app.evaluate("x"), 10)
+        self.assertEqual(app.evaluate("n"), 0)
+
+    def test_source_transaction_is_atomic(self):
+        vm = VM()
+        vm.mutate({10: "x=1", 20: "END"}, "setup")
+        vm.immediate('SOURCE BEGIN')
+        vm.immediate('SOURCE SET 10, "x=2"')
+        self.assertEqual(vm.program.source[10], "x=1")
+        vm.immediate("SOURCE COMMIT")
+        self.assertEqual(vm.program.source[10], "x=2")
+        vm.immediate("SOURCE BEGIN")
+        with self.assertRaises(BasicError):
+            vm.immediate('SOURCE SET 0, "invalid"')
+        self.assertNotIn(0, vm.program.source)
+        vm.immediate("SOURCE ROLLBACK")
+
+    def test_listing_versions_and_text_functions(self):
+        vm = VM()
+        self.assertEqual(vm.evaluate("DIRTY"), 0)
+        vm.mutate({10: "END"}, "setup")
+        self.assertEqual(vm.evaluate("LISTINGVERSION"), 1)
+        self.assertEqual(vm.evaluate("DIRTY"), -1)
+        vm.immediate('x$=" hello "')
+        self.assertEqual(vm.evaluate('TRIM$(x$)'), "hello")
+        self.assertEqual(vm.evaluate('JOIN$("-", "a", "b")'), "a-b")
+        self.assertEqual(vm.evaluate('SPLITCOUNT("a,b,c")'), 3)
+        self.assertEqual(vm.evaluate('CSVESCAPE$("a""b")'), '"a""b"')
+
 
 if __name__ == "__main__":
     unittest.main()

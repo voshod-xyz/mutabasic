@@ -4,7 +4,7 @@
 
 MutaBasic — экспериментальный интерпретатор подмножества QBasic. Главная особенность — инструкции `SOURCE`, позволяющие программе инспектировать и изменять свой исходный текст по вычисляемым условиям, а затем отменять изменения.
 
-Текущая версия кода: **0.666**. Python **3.10+**, только стандартная библиотека.
+Текущая версия кода: **0.700**. Python **3.10+**, только стандартная библиотека.
 
 > Это не полная реализация Microsoft QBasic и не песочница. Код требует дальнейшего тестирования. Встроенные smoke-тесты доступны через `--self-test`; их наличие не означает полной проверки совместимости.
 
@@ -81,7 +81,7 @@ mutabasic --self-test
 | Управление | IF, FOR, WHILE, DO, EXIT, GOTO, GOSUB, SUB/FUNCTION, ON … GOTO/GOSUB |
 | Данные | Числа, строки, многомерные массивы, DATA/READ/RESTORE |
 | Самоинспекция | LINE$, LINEEXISTS, FINDLINE, PROGRAM$ |
-| Изменение кода | SOURCE SET, INSERT, DELETE, REPLACE, UNDO, REDO; безопасные FIND/REPLACE с диапазонами и флагом регистра |
+| Изменение кода | SOURCE BEGIN/COMMIT/ROLLBACK, SET, INSERT, DELETE, REPLACE, UNDO, REDO; атомарная компиляция кандидата |
 | Отладка | STEP, BREAK WHEN, WHERE, STACK, WATCH, TRACE, JSON trace |
 | Состояние | Системные показатели, счётчики, именованные таймеры |
 | Хранение | Листинги, JSON-проекты, переменные, снимки, CHECKPOINT/ROLLBACK |
@@ -118,10 +118,12 @@ muta> CONT
 ## Инструкции SOURCE
 
 ```basic
+SOURCE BEGIN
 SOURCE SET number, text$
 SOURCE INSERT number, text$
 SOURCE DELETE first [, last]
 SOURCE REPLACE old$, new$ [, first, last, case_sensitive]
+SOURCE COMMIT / SOURCE ROLLBACK
 SOURCE UNDO [count]
 SOURCE REDO [count]
 ```
@@ -130,14 +132,20 @@ SOURCE REDO [count]
 - `INSERT` требует свободный номер.
 - `DELETE` удаляет строку или диапазон.
 - `REPLACE` по умолчанию не учитывает регистр; ненулевой последний аргумент включает его учёт.
+- `BEGIN` начинает отложенную транзакцию. Все изменения проверяются, но не
+  публикуются до `COMMIT`; `ROLLBACK` отбрасывает накопленный кандидат.
 В оболочке доступны `FIND text [--case-sensitive]` и
 `REPLACE "old" "new" [first last] [--case-sensitive]`.
+Для единого поиска доступны `FIND`/`SEARCH SOURCE|VARS|VALUES`; например
+`SEARCH VARS "error"`. Замена строковых переменных выполняется как
+`REPLACE VARS "old" "new"` (по умолчанию без учёта регистра).
 - `UNDO` и `REDO` поддерживают несколько шагов.
 - История ограничена параметром `--history-limit` — по умолчанию 100.
 
 ### Правила изменения во время исполнения
 
-1. Каждая инструкция `SOURCE` применяется как отдельное изменение с предварительной компиляцией структуры листинга.
+1. Каждая инструкция `SOURCE` вне `BEGIN` применяется как отдельное изменение;
+   каждый кандидат компилируется до публикации.
 2. В работающей или приостановленной программе блоки должны оставаться структурно завершёнными.
 3. Заголовок активного `FOR` или `DO` нельзя удалить или изменить. Тело цикла менять можно.
 4. Исполнение продолжается с прежнего следующего адреса либо ближайшего сохранившегося адреса после него.
@@ -159,9 +167,10 @@ PRINT PROGRAM$
 `FINDLINE(text$ [, start, case_sensitive])` возвращает номер строки или 0.
 
 Встроенные `SUB name(args) ... END SUB` и `FUNCTION name(args) ...
-END FUNCTION` поддерживают позиционные параметры, общие переменные и
-рекурсию с ограничением глубины. Это минимальная реализация без локальных
-областей и передачи параметров по ссылке.
+END FUNCTION` поддерживают позиционные параметры, рекурсию с ограничением
+глубины и локальные кадры параметров. Имя результата `FUNCTION` также
+локально. Остальные переменные остаются глобальными для совместимости;
+передача по ссылке и локальные объявления пока не поддерживаются.
 
 ## Работа в оболочке
 
@@ -174,7 +183,8 @@ END FUNCTION` поддерживают позиционные параметры
 | LIST [first [last]] | Просмотр строк |
 | EDIT number text / INSERT number text | Редактирование |
 | DELETE first [last] | Удаление |
-| FIND text / REPLACE "old" "new" | Поиск и замена |
+| FIND/SEARCH [SOURCE\|VARS\|VALUES] text | Единый поиск |
+| REPLACE "old" "new" / REPLACE VARS "old" "new" | Замена в листинге или строковых переменных |
 | UNDO [n] / REDO [n] / HISTORY | История |
 | RUN [line_or_label] | Новый запуск с очисткой пользовательских переменных |
 | CONT / STEP [n] | Продолжение и шаги |
@@ -208,7 +218,8 @@ muta> BASIC RESTORE
 - Время: `DATE$`, `TIME$`, `TIMER`, `UPTIME`, `ELAPSED`.
 - Счётчики: `RUNCOUNT`, `LAUNCHCOUNT`, `STEPS`, `TOTALSTEPS`.
 - Исполнение: `CURRENTLINE`, `NEXTLINE`, `CALLDEPTH`, `LOOPDEPTH`, `DATAPOS`.
-- Листинг: `LINECOUNT`, `HISTORYCOUNT`, `REDOCOUNT`, `LISTINGEDITS`, `PROGRAM$`.
+- Листинг: `LINECOUNT`, `HISTORYCOUNT`, `REDOCOUNT`, `LISTINGEDITS`,
+  `LISTINGVERSION`, `SAVEDVERSION`, `DIRTY`, `PROGRAM$`.
 - Диск: `FREEDISK`, `TOTALDISK` — байты на диске рабочей папки.
 - Диагностика: `LASTEXIT`, `LASTOUTPUT$`, `LASTERROR$`, `ERRORLINE`.
 
@@ -227,6 +238,9 @@ PRINT TIMERGET("work")
 `LISTINGEDITS` считает успешные изменения листинга, включая редактирование
 через REPL/API, инструкции `SOURCE` и операции `UNDO`/`REDO`. Счётчик
 сохраняется в JSON-проектах и снимках и доступен только для чтения.
+`LISTINGVERSION` увеличивается на каждую опубликованную правку, а
+`SAVEDVERSION` фиксирует последнюю сохранённую версию. `DIRTY` равен `-1`,
+если версии различаются, иначе `0`.
 
 `ELAPSED` учитывает время исполнения, включая INPUT/SLEEP, но не паузы REPL. Именованные таймеры считают монотонное реальное время, включая паузы, пока не остановлены.
 
@@ -242,7 +256,7 @@ PRINT TIMERGET("work")
 |---|---|
 | Математика | `ABS`, `ATN`, `COS`, `SIN`, `TAN`, `SQR`, `EXP`, `LOG`, `INT`, `FIX`, `CINT`, `CLNG`, `CSNG`, `CDBL`, `SGN`, `MIN`, `MAX`, `ROUND`, `FLOOR`, `CEIL`, `RND` |
 | Строки | `LEN`, `ASC`, `CHR$`, `STR$`, `VAL`, `HEX$`, `OCT$`, `LEFT$`, `RIGHT$`, `MID$`, `LCASE$`, `UCASE$`, `LTRIM$`, `RTRIM$`, `SPACE$`, `STRING$`, `INSTR`, `TAB`, `SPC`, `INKEY$` |
-| Текст | `TRIM$`, `REPLACE$`, `FIELD$`, `CONTAINS`, `STARTSWITH`, `ENDSWITH` |
+| Текст | `TRIM$`, `REPLACE$`, `FIELD$`, `JOIN$`, `SPLITCOUNT`, `SPLITFIELD$`, `CSVESCAPE$`, `CONTAINS`, `STARTSWITH`, `ENDSWITH` |
 | Массивы и переменные | `LBOUND`, `UBOUND`, `VAREXISTS` |
 | Листинг и система | `LINE$`, `LINEEXISTS`, `FINDLINE`, `TIMERGET`, `SYS`, `SYS$`, `ENVIRON$` |
 | Файлы | `FILEEXISTS`, `DIREXISTS`, `FILESIZE`, `READFILE$`, `EOF`, `LOF`, `LOC`, `SEEK` |
@@ -256,6 +270,11 @@ PRINT TIMERGET("work")
 `SHELL(command$)` возвращает код завершения команды, а `SHELL$(command$)` —
 перехваченный stdout. Обе функции подчиняются текущей `ShellPolicy`; stderr
 не добавляется к возвращаемому stdout.
+
+`CONTAINS`, `STARTSWITH` и `ENDSWITH` возвращают `-1`/`0`; третий аргумент
+`sensitive` включает учёт регистра (по умолчанию поиск нечувствителен).
+`FIELD$`/`SPLITFIELD$` используют нумерацию с 1, `SPLITCOUNT` возвращает
+количество полей, а `CSVESCAPE$` безопасно заключает значение в CSV-кавычки.
 
 ## Файлы и команды ОС
 
@@ -332,6 +351,12 @@ python mutabasic.py --project example.mbp --no-run
 python mutabasic.py --restore snapshot.json -i
 python mutabasic.py -e "EVAL 2^10"
 ```
+
+Для встраивания доступен детерминированный пошаговый API:
+`VM.trace_events` содержит JSON-совместимые события `step` с адресом,
+инструкцией и временной меткой; `--seed`, `time_provider` и
+`random_provider` позволяют воспроизводить входные условия. Trace — это
+журнал исполнения, а не откат внешних файлов, окружения или `SHELL`.
 
 | Ключ | Назначение |
 |---|---|

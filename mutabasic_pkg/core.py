@@ -49,7 +49,7 @@ from .security import ShellPolicy
 
 
 NAME = "MutaBasic"
-VERSION = "1.0.0"
+VERSION = "0.700"
 FORMAT_VERSION = 1
 
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*[$%!#&]?"
@@ -713,6 +713,10 @@ class VM:
 
         self.variables: dict[str, Value] = {}
         self.arrays: dict[str, dict] = {}
+        # Procedure parameters and function return values live in call frames.
+        # Ordinary variables remain global for compatibility with existing
+        # programs; a frame shadows only names declared by that procedure.
+        self._frames: list[dict[str, Value]] = []
         self.base = 0
 
         self.pc = ADDRESS_END
@@ -727,6 +731,9 @@ class VM:
         self.state = "ready"
         self.run_count = 0
         self.listing_edits = 0
+        self.listing_version = 0
+        self.saved_version = 0
+        self._source_transaction: dict[int, str] | None = None
         self.steps = 0
         self.total_steps = 0
         self.launch_count = launch_count
@@ -770,7 +777,7 @@ class VM:
             "ELAPSED", "FREEDISK", "TOTALDISK", "CURRENTLINE", "NEXTLINE",
             "CALLDEPTH", "LOOPDEPTH", "DATAPOS", "LINECOUNT", "HISTORYCOUNT",
             "REDOCOUNT", "LISTINGEDITS", "LASTEXIT", "LASTOUTPUT$",
-            "LASTERROR$", "ERRORLINE",
+            "LASTERROR$", "ERRORLINE", "LISTINGVERSION", "SAVEDVERSION", "DIRTY",
             "CWD$", "PROJECT$", "STATE$", "VERSION$", "PID",
         }
 
@@ -955,6 +962,9 @@ class VM:
             "HISTORYCOUNT": lambda: len(self.undo_stack),
             "REDOCOUNT": lambda: len(self.redo_stack),
             "LISTINGEDITS": lambda: self.listing_edits,
+            "LISTINGVERSION": lambda: self.listing_version,
+            "SAVEDVERSION": lambda: self.saved_version,
+            "DIRTY": lambda: -int(self.dirty),
             "LASTEXIT": lambda: self.last_exit,
             "LASTOUTPUT$": lambda: self.last_output,
             "LASTERROR$": lambda: self.last_error,
@@ -977,6 +987,9 @@ class VM:
         if name == "INKEY$":
             return self.inkey()
 
+        for frame in reversed(self._frames):
+            if name in frame:
+                return frame[name]
         return self.variables.get(name, self.default(name))
 
     def lvalue(self, text: str) -> tuple[str, list[int] | None]:
@@ -1038,6 +1051,10 @@ class VM:
         value = self.coerce(name, value)
 
         if indices is None:
+            for frame in reversed(self._frames):
+                if name in frame:
+                    frame[name] = value
+                    return
             self.variables[name] = value
         else:
             array, key = self.array_cell(name, indices)
@@ -1077,8 +1094,10 @@ class VM:
         self.routine_depth += 1
         self._routine_return = False
         self.calls, self.loops = [], []
-        for param, value in zip(routine["params"], args):
-            self.assign(param, value)
+        frame = {param: self.coerce(param, value)
+                 for param, value in zip(routine["params"], args)}
+        frame[canonical(name)] = self.default(canonical(name))
+        self._frames.append(frame)
         result = self.default(canonical(name))
         self.pc = self.program.after(routine["start"])
         self.state = "running"
@@ -1096,6 +1115,7 @@ class VM:
             result = self.variable_get(name)
         finally:
             self.pc, self.current, self.state, self.calls, self.loops, self._routine_return = saved
+            self._frames.pop()
             self.routine_depth -= 1
         return result
 
@@ -1182,6 +1202,18 @@ class VM:
             index = int(index)
             return parts[index - 1] if 1 <= index <= len(parts) else ""
 
+        def join_text(separator, *parts):
+            return str(separator).join(str(part) for part in parts)
+
+        def split_count(text, separator=","):
+            return len(split_outside(str(text), str(separator)[:1] or ","))
+
+        def split_field(text, index, separator=","):
+            return field_text(text, index, separator)
+
+        def csv_escape(value):
+            return '"' + str(value).replace('"', '""') + '"'
+
         def sys_value(key):
             key = canonical(str(key))
             aliases = {
@@ -1221,6 +1253,10 @@ class VM:
             "TRIM$": lambda s: str(s).strip(),
             "REPLACE$": replace_text,
             "FIELD$": field_text,
+            "JOIN$": join_text,
+            "SPLITCOUNT": split_count,
+            "SPLITFIELD$": split_field,
+            "CSVESCAPE$": csv_escape,
             "STARTSWITH": lambda s, prefix, sensitive=0: -int(
                 str(s).startswith(str(prefix)) if sensitive else
                 str(s).casefold().startswith(str(prefix).casefold())
@@ -1379,6 +1415,7 @@ class VM:
         self.install_source(candidate)
         after = dict(self.program.source)
         self.listing_edits += 1
+        self.listing_version += 1
         self.audit_mutation(description, before, after)
         old["diff"] = [{"line": line, "before": before.get(line), "after": after.get(line)} for line in sorted(set(before) | set(after))]
         self.undo_stack.append(old)
@@ -1411,11 +1448,26 @@ class VM:
         destination_stack[:] = destination_stack[-self.history_limit:]
         self.install_source(candidate)
         self.listing_edits += 1
+        self.listing_version += 1
 
     def source_statement(self, body: str) -> None:
         pieces = body.split(None, 1)
         action = pieces[0].upper() if pieces else ""
         rest = pieces[1] if len(pieces) > 1 else ""
+
+        if action == "BEGIN":
+            if self._source_transaction is not None:
+                raise BasicError("SOURCE BEGIN уже активен")
+            self._source_transaction = dict(self.program.source)
+            return
+        if action in ("COMMIT", "ROLLBACK"):
+            if self._source_transaction is None:
+                raise BasicError("Нет активной SOURCE-транзакции")
+            staged = self._source_transaction
+            if action == "COMMIT":
+                self.mutate(staged, "SOURCE COMMIT")
+            self._source_transaction = None
+            return
 
         if action in ("UNDO", "REDO"):
             count = int(self.evaluate(rest)) if rest else 1
@@ -1423,7 +1475,11 @@ class VM:
             return
 
         args = [self.evaluate(x) for x in split_outside(rest)] if rest else []
-        source = dict(self.program.source)
+        source = dict(
+            self._source_transaction
+            if self._source_transaction is not None
+            else self.program.source
+        )
 
         if action in ("SET", "INSERT"):
             if len(args) != 2 or not isinstance(args[1], str):
@@ -1463,7 +1519,14 @@ class VM:
         else:
             raise BasicError("SOURCE: SET, INSERT, DELETE, REPLACE, UNDO, REDO")
 
-        self.mutate(source, f"SOURCE {action}")
+        # Compile before changing the staged listing, so invalid candidates
+        # never partially alter either the live or transactional source.
+        candidate = Program(source)
+        self.check_replacement(candidate)
+        if self._source_transaction is not None:
+            self._source_transaction = source
+        else:
+            self.mutate(source, f"SOURCE {action}")
 
     # ---------- Files and console ----------
 
@@ -1624,6 +1687,21 @@ class VM:
             raise BasicError("Не найден конец/начало блока")
         return self.program.pairs[address]
 
+    def safe_jump(self, target: Address) -> Address:
+        """Reject jumps that enter or leave an active structured loop."""
+        for frame in self.loops:
+            start = frame["start"]
+            end = self.program.pairs.get(start)
+            if end is None:
+                raise BasicError("Активный цикл повреждён")
+            inside = start <= target <= end
+            current_inside = start <= (self.current or start) <= end
+            if inside != current_inside:
+                raise BasicError(
+                    "GOTO/GOSUB пересекает активный блок; используйте EXIT"
+                )
+        return target
+
     def suffix_condition(self, text: str) -> bool:
         text = text.strip()
         if not text:
@@ -1674,9 +1752,12 @@ class VM:
             self.routine_depth += 1
             previous_return = self._routine_return
             self._routine_return = False
+            frame = {
+                param: self.coerce(param, value)
+                for param, value in zip(routine["params"], args)
+            }
+            self._frames.append(frame)
             try:
-                for param, value in zip(routine["params"], args):
-                    self.assign(param, value)
                 address = self.program.after(routine["start"])
                 while address != routine["end"]:
                     self.pc = self.program.after(address)
@@ -1685,6 +1766,7 @@ class VM:
                         break
                     address = self.program.at_or_after(self.pc)
             finally:
+                self._frames.pop()
                 self._routine_return = previous_return
                 self.routine_depth -= 1
             return
@@ -1760,7 +1842,7 @@ class VM:
 
         if command in ("GOTO", "GOSUB"):
             self.require_program(address)
-            target = self.program.target(body)
+            target = self.safe_jump(self.program.target(body))
             if command == "GOSUB":
                 self.calls.append(self.pc)
             self.pc = target
@@ -1783,7 +1865,7 @@ class VM:
             index = int(self.evaluate(match.group(1)))
             targets = split_outside(match.group(3))
             if 1 <= index <= len(targets):
-                destination = self.program.target(targets[index - 1])
+                destination = self.safe_jump(self.program.target(targets[index - 1]))
                 if match.group(2).upper() == "GOSUB":
                     self.calls.append(self.pc)
                 self.pc = destination
@@ -2326,6 +2408,8 @@ class VM:
             "redo": copy.deepcopy(self.redo_stack),
             "run_count": self.run_count,
             "listing_edits": self.listing_edits,
+            "listing_version": self.listing_version,
+            "saved_version": self.saved_version,
         }
 
     def save_project(self, path: str) -> None:
@@ -2336,12 +2420,15 @@ class VM:
         })
         self.project_path = str(Path(path).resolve())
         self.dirty = False
+        self.saved_version = self.listing_version
 
     def restore_project_payload(self, obj: dict) -> None:
         self.program = Program({int(k): v for k, v in obj["source"].items()})
         self.project_name = str(obj.get("name", "untitled"))
         self.run_count = int(obj.get("run_count", 0))
         self.listing_edits = int(obj.get("listing_edits", 0))
+        self.listing_version = int(obj.get("listing_version", self.listing_edits))
+        self.saved_version = int(obj.get("saved_version", self.listing_version))
         if self.listing_edits < 0:
             raise BasicError("Некорректный счётчик правок листинга")
 
@@ -2509,6 +2596,9 @@ class VM:
         self.data_pointer = 0
         self.state = "ready"
         self.dirty = False
+        self.listing_version = 0
+        self.saved_version = 0
+        self._source_transaction = None
 
 
 HELP = {
@@ -2543,8 +2633,10 @@ LIST [от [до]]             Показать листинг
 EDIT номер текст           Добавить/заменить строку
 INSERT номер текст         Добавить строку; номер должен быть свободен
 DELETE от [до]             Удалить строки
-FIND текст                 Поиск без учёта регистра
+FIND [SOURCE|VARS|VALUES] текст [--case-sensitive]
+SEARCH ...                  То же имя для единого поиска
 REPLACE "что" "на что" [от до] [--case-sensitive]
+REPLACE VARS "что" "на что"  Замена в строковых переменных
 UNDO [n] / REDO [n]         Отмена/повтор изменений листинга
 HISTORY                    История изменений
 CHECK                      Проверить структуру блоков
@@ -2603,12 +2695,15 @@ AND OR XOR NOT EQV IMP — побитовые операции, без short cir
 
 Нет TYPE, SELECT CASE, ELSEIF, ON ERROR,
 PRINT USING, графики, двоичных и RANDOM-файлов.
-Нет вложенного однострочного IF и NEXT i,j. SUB/FUNCTION имеют общую
-область переменных и ограничение глубины рекурсии.
+Нет вложенного однострочного IF и NEXT i,j. Параметры SUB/FUNCTION и
+имя результата FUNCTION локальны и безопасны для рекурсии; остальные
+переменные остаются глобальными для совместимости. Передача по ссылке
+не поддерживается.
 Не эмулируются переполнения и точные численные типы QBasic.
 Произвольный GOTO через границы активных циклов не очищает их стеки.
 """,
     "source": """
+SOURCE BEGIN / COMMIT / ROLLBACK
 SOURCE SET номер, текст$
 SOURCE INSERT номер, текст$
 SOURCE DELETE от [, до]
@@ -2622,7 +2717,8 @@ FINDLINE(текст$ [, от, регистр])  Номер найденной с
 PROGRAM$                      Полный нумерованный листинг
 
 Правила:
-  * Каждая SOURCE-инструкция — отдельная транзакция.
+  * BEGIN накапливает изменения; COMMIT применяет их одной транзакцией,
+    ROLLBACK отбрасывает. Каждый кандидат компилируется до публикации.
   * UNDO/REDO меняют только листинг, не переменные и внешние файлы.
   * При работающей/приостановленной программе блоки должны оставаться целыми.
   * Заголовок активного FOR/DO нельзя удалять или изменять.
@@ -2645,6 +2741,7 @@ PROGRAM$                      Полный нумерованный листин
 RUNCOUNT — число RUN проекта; хранится в проекте и снимках.
 LAUNCHCOUNT — число запусков процесса, хранимое в файле состояния.
 LISTINGEDITS — число успешных изменений листинга, включая UNDO/REDO.
+LISTINGVERSION/SAVEDVERSION — версии листинга; DIRTY = -1 при отличии.
 STEPS — выполненные инструкции текущего RUN.
 TOTALSTEPS — общий счётчик VM, сохраняется в снимке.
 ELAPSED — время исполнения VM, включая INPUT/SLEEP, без пауз REPL.
@@ -2728,7 +2825,9 @@ snapshot.json: проект + переменные + позиция исполн
 ABS ATN COS SIN TAN SQR EXP LOG INT FIX CINT CLNG CSNG CDBL SGN
 MIN MAX ROUND FLOOR CEIL RND([n])
 LEN ASC CHR$ STR$ VAL HEX$ OCT$
-LEFT$ RIGHT$ MID$ LCASE$ UCASE$ LTRIM$ RTRIM$
+LEFT$ RIGHT$ MID$ LCASE$ UCASE$ LTRIM$ RTRIM$ TRIM$ REPLACE$
+FIELD$ JOIN$ SPLITCOUNT SPLITFIELD$ CSVESCAPE$
+CONTAINS STARTSWITH ENDSWITH
 SPACE$ STRING$ INSTR TAB SPC INKEY$
 LBOUND("A" [,dimension]) UBOUND("A" [,dimension])
 VAREXISTS("X")
@@ -2759,7 +2858,7 @@ def path_argument(text: str, default: str | None = None) -> str:
 class Shell:
     COMMANDS = {
         "HELP", "NEW", "LOAD", "SAVE", "PROJECT", "LIST", "EDIT", "INSERT",
-        "DELETE", "FIND", "REPLACE", "UNDO", "REDO", "HISTORY", "CHECK",
+        "DELETE", "FIND", "SEARCH", "REPLACE", "UNDO", "REDO", "HISTORY", "CHECK",
         "RUN", "CONT", "STEP", "BREAK", "UNBREAK", "WHERE", "STACK", "WATCH",
         "CHECKPOINT", "ROLLBACK", "AUDIT", "VARS", "SYS", "SET",
         "EVAL", "VARSAVE", "VARLOAD", "SNAPSHOT", "RESTORE", "PWD", "CD",
@@ -2840,6 +2939,9 @@ class Shell:
             Path(path_argument(argument)).write_text(
                 vm.program.listing() + "\n", encoding="utf-8"
             )
+            vm.project_path = str(Path(path_argument(argument)).resolve())
+            vm.dirty = False
+            vm.saved_version = vm.listing_version
         elif command == "PROJECT":
             parts = argument.split(None, 1)
             if len(parts) != 2 or parts[0].upper() not in ("SAVE", "LOAD"):
@@ -2870,21 +2972,46 @@ class Shell:
             if not 1 <= len(bounds) <= 2:
                 raise BasicError("DELETE от [до]")
             vm.source_statement("DELETE " + ",".join(map(str, bounds)))
-        elif command == "FIND":
+        elif command in ("FIND", "SEARCH"):
             args = shlex.split(argument)
             sensitive = "--case-sensitive" in args or "-s" in args
             args = [x for x in args if x not in ("--case-sensitive", "-s")]
             if not args:
-                raise BasicError("FIND текст [--case-sensitive]")
+                raise BasicError("FIND [SOURCE|VARS|VALUES] текст [--case-sensitive]")
+            scope = args[0].upper() if args[0].upper() in ("SOURCE", "VARS", "VALUES") else "SOURCE"
+            if scope != "SOURCE":
+                args = args[1:]
+            if not args:
+                raise BasicError("FIND область текст")
             needle = args[0] if sensitive else args[0].casefold()
-            for number, text in vm.program.source.items():
-                haystack = text if sensitive else text.casefold()
-                if needle in haystack:
-                    print(f"{number} {text}")
+            if scope == "SOURCE":
+                for number, text in vm.program.source.items():
+                    haystack = text if sensitive else text.casefold()
+                    if needle in haystack:
+                        print(f"{number} {text}")
+            else:
+                for name, value in vm.variables.items():
+                    haystack = str(value) if sensitive else str(value).casefold()
+                    if needle in haystack:
+                        print(f"{name} = {value}")
         elif command == "REPLACE":
             args = shlex.split(argument)
             sensitive = "--case-sensitive" in args or "-s" in args
             args = [x for x in args if x not in ("--case-sensitive", "-s")]
+            scope = args[0].upper() if args and args[0].upper() in ("VARS", "VALUES") else "SOURCE"
+            if scope != "SOURCE":
+                args = args[1:]
+                if len(args) != 2:
+                    raise BasicError('REPLACE VARS|VALUES "что" "на что"')
+                old, new = args
+                flags = 0 if sensitive else re.I
+                pattern = re.compile(re.escape(old), flags)
+                updated = copy.deepcopy(vm.variables)
+                for name, value in updated.items():
+                    if isinstance(value, str):
+                        updated[name] = pattern.sub(new, value)
+                vm.variables = updated
+                return True
             if len(args) not in (2, 4):
                 raise BasicError('REPLACE "что" "на что" [от до] [--case-sensitive]')
             quoted = ['"' + item.replace('"', '""') + '"' for item in args[:2]]
