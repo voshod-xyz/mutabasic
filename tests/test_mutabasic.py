@@ -87,6 +87,36 @@ class MutaBasicTests(unittest.TestCase):
         vm.rollback("before")
         self.assertEqual(vm.evaluate("x"), 1)
 
+    def test_seeded_randomize_and_nested_loops(self):
+        source = {
+            10: "RANDOMIZE 42",
+            20: "a=RND",
+            30: "x=0",
+            40: "FOR i=1 TO 2",
+            50: "FOR j=1 TO 2",
+            60: "x=x+1",
+            70: "NEXT j",
+            80: "NEXT i",
+            90: "END",
+        }
+        first = MutaBasic().load(source).run()
+        second = MutaBasic().load(source).run()
+        self.assertEqual(first.evaluate("a"), second.evaluate("a"))
+        self.assertEqual(first.evaluate("x"), 4)
+
+    def test_recursive_function_and_text_helpers(self):
+        app = MutaBasic().load({
+            10: "FUNCTION FACT(n)",
+            20: "IF n<=1 THEN FACT=1:END FUNCTION",
+            30: "FACT=n*FACT(n-1)",
+            40: "END FUNCTION",
+            50: "x=FACT(5)",
+            60: "s$=REPLACE$(\"Hello hello\", \"hello\", \"X\")",
+            70: "END",
+        }).run()
+        self.assertEqual(app.evaluate("x"), 120)
+        self.assertEqual(app.evaluate("s$"), "X X")
+
 
 if __name__ == "__main__":
     unittest.main()

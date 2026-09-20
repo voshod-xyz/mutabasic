@@ -78,10 +78,10 @@ mutabasic --self-test
 | Область | Возможности |
 |---|---|
 | Исполнение | REPL, CLI, нумерованные строки, метки, непосредственные инструкции |
-| Управление | IF, FOR, WHILE, DO, GOTO, GOSUB, ON … GOTO/GOSUB |
+| Управление | IF, FOR, WHILE, DO, EXIT, GOTO, GOSUB, SUB/FUNCTION, ON … GOTO/GOSUB |
 | Данные | Числа, строки, многомерные массивы, DATA/READ/RESTORE |
 | Самоинспекция | LINE$, LINEEXISTS, FINDLINE, PROGRAM$ |
-| Изменение кода | SOURCE SET, INSERT, DELETE, REPLACE, UNDO, REDO |
+| Изменение кода | SOURCE SET, INSERT, DELETE, REPLACE, UNDO, REDO; безопасные FIND/REPLACE с диапазонами и флагом регистра |
 | Отладка | STEP, BREAK WHEN, WHERE, STACK, WATCH, TRACE, JSON trace |
 | Состояние | Системные показатели, счётчики, именованные таймеры |
 | Хранение | Листинги, JSON-проекты, переменные, снимки, CHECKPOINT/ROLLBACK |
@@ -130,6 +130,8 @@ SOURCE REDO [count]
 - `INSERT` требует свободный номер.
 - `DELETE` удаляет строку или диапазон.
 - `REPLACE` по умолчанию не учитывает регистр; ненулевой последний аргумент включает его учёт.
+В оболочке доступны `FIND text [--case-sensitive]` и
+`REPLACE "old" "new" [first last] [--case-sensitive]`.
 - `UNDO` и `REDO` поддерживают несколько шагов.
 - История ограничена параметром `--history-limit` — по умолчанию 100.
 
@@ -155,6 +157,11 @@ PRINT PROGRAM$
 ```
 
 `FINDLINE(text$ [, start, case_sensitive])` возвращает номер строки или 0.
+
+Встроенные `SUB name(args) ... END SUB` и `FUNCTION name(args) ...
+END FUNCTION` поддерживают позиционные параметры, общие переменные и
+рекурсию с ограничением глубины. Это минимальная реализация без локальных
+областей и передачи параметров по ссылке.
 
 ## Работа в оболочке
 
@@ -231,6 +238,7 @@ PRINT TIMERGET("work")
 |---|---|
 | Математика | `ABS`, `ATN`, `COS`, `SIN`, `TAN`, `SQR`, `EXP`, `LOG`, `INT`, `FIX`, `CINT`, `CLNG`, `CSNG`, `CDBL`, `SGN`, `MIN`, `MAX`, `ROUND`, `FLOOR`, `CEIL`, `RND` |
 | Строки | `LEN`, `ASC`, `CHR$`, `STR$`, `VAL`, `HEX$`, `OCT$`, `LEFT$`, `RIGHT$`, `MID$`, `LCASE$`, `UCASE$`, `LTRIM$`, `RTRIM$`, `SPACE$`, `STRING$`, `INSTR`, `TAB`, `SPC`, `INKEY$` |
+| Текст | `TRIM$`, `REPLACE$`, `FIELD$`, `CONTAINS`, `STARTSWITH`, `ENDSWITH` |
 | Массивы и переменные | `LBOUND`, `UBOUND`, `VAREXISTS` |
 | Листинг и система | `LINE$`, `LINEEXISTS`, `FINDLINE`, `TIMERGET`, `SYS`, `SYS$`, `ENVIRON$` |
 | Файлы | `FILEEXISTS`, `DIREXISTS`, `FILESIZE`, `READFILE$`, `EOF`, `LOF`, `LOC`, `SEEK` |
