@@ -49,7 +49,7 @@ from .security import ShellPolicy
 
 
 NAME = "MutaBasic"
-VERSION = "0.700"
+VERSION = "0.701"
 FORMAT_VERSION = 1
 
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*[$%!#&]?"
@@ -2604,6 +2604,7 @@ class VM:
 HELP = {
     "": """
 MutaBasic
+  версия 0.701
   HELP commands    Команды оболочки
   HELP language    Операторы BASIC и ограничения
   HELP source      Изменение собственного листинга
@@ -2692,6 +2693,10 @@ REM comment / ' comment
 Сравнения: -1 = истина, 0 = ложь.
 AND OR XOR NOT EQV IMP — побитовые операции, без short circuit.
 ^ — степень; \\ — целочисленное деление; MOD — остаток.
+
+Сильные стороны: маленькое предсказуемое ядро, REPL, трассировка и
+безопасная самомодификация листинга. Это язык экспериментов, а не
+совместимый со всеми диалектами промышленный BASIC.
 
 Нет TYPE, SELECT CASE, ELSEIF, ON ERROR,
 PRINT USING, графики, двоичных и RANDOM-файлов.
